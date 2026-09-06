@@ -1,0 +1,11 @@
+# Config real (contém chat_id, paths — dado do usuário)
+config.yaml
+
+# Estado por-repo da vigia
+state/
+*.state.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/

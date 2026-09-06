@@ -1,0 +1,31 @@
+# kiro-esteira — configuração de exemplo
+# Copie para config.yaml e ajuste. NÃO commite o config.yaml real (está no .gitignore).
+
+# Repositórios vigiados (owner/repo). A esteira varre todos procurando issues `ready`.
+repos:
+  - owner/repo-a
+  - owner/repo-b
+
+# Para onde vão as notificações (Telegram chat_id do dono, ou de um canal dedicado).
+# Deixe vazio para não notificar por voz/DM.
+notify_chat_id: "<SEU_CHAT_ID>"
+
+# Disparo automático:
+#   false = Fase 1 (a vigia só AVISA quando há issue `ready`; você aciona manual)
+#   true  = Fase 2 (dispara uma sessão one-shot que implementa a issue e encerra)
+auto_dispatch: false
+
+# Limites de segurança
+max_concurrent: 2        # máx de sessões da esteira rodando ao mesmo tempo (global)
+max_turns_per_task: 60   # teto duro de turnos por sessão disparada
+one_per_repo: true       # no máx 1 sessão ativa por repo (evita colisão de merge)
+
+# Onde ficam os clones locais usados como base dos worktrees (sem reclonar).
+# A esteira cria worktrees isolados em <dev_root>/.esteira-worktrees/<repo>-<n>.
+dev_root: "/home/<USER>/dev"
+
+# Caminho do vault Obsidian para espelhar o progresso (opcional; vazio = não espelha).
+vault_root: ""
+
+# Agente do Kiro Crew usado nas sessões one-shot.
+agent: "kirocrew"
