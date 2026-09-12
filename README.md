@@ -1,6 +1,6 @@
-# Kiro Flow
+# KiroCrew Flow
 
-> **Kiro Flow** (KF) — Gerenciador de fluxos de desenvolvimento para o ecossistema **[Kiro Crew](https://github.com/kirodotdev)**.
+> **KiroCrew Flow** — Gerenciador de fluxos de desenvolvimento para o ecossistema **[Kiro Crew](https://github.com/kirodotdev)**.
 
 Uma esteira de desenvolvimento autônoma com **zero-token no agendamento**: observa issues em múltiplos repositórios e, quando detecta trabalho real, dispara sessões de execução one-shot que implementam, abrem PR e mergeiam.
 

@@ -1,16 +1,16 @@
-# Kiro Flow — Visão do Projeto
+# KiroCrew Flow — Visão do Projeto
 
 > App do ecossistema Kiro Crew para gerenciar fluxos de desenvolvimento multi-squad.
 
 ## O que é
 
-**Kiro Flow** é um gerenciador de fluxos de desenvolvimento que:
+**KiroCrew Flow** é um gerenciador de fluxos de desenvolvimento que:
 - Centraliza e orquestra todo o ciclo de vida de tasks (feature, bug, hotfix, debt)
 - Suporta múltiplas squads, cada uma com seus repos, fluxos e regras
 - Executa automaticamente, com **zero token no agendamento** (observação é script puro)
 - Rastreia cada task por labels no Jira/GitHub, visível pra todo o time
 
-**Abreviação:** KF | **Prefixo:** `kf:`
+**Prefixo:** `crewflow:`
 
 ## Diferencial central: ZERO-TOKEN no agendamento
 
@@ -18,7 +18,7 @@ O problema de outros modelos:
 1. Uma automação por repositório — não escala pra multi-squad/multi-repo
 2. Agendamento gasta token mesmo parado — insustentável
 
-**Kiro Flow resolve:**
+**KiroCrew Flow resolve:**
 - **Observação = script determinístico, ZERO token** — varre múltiplos repos numa passada via API
 - **Token só na AÇÃO** — só gasta quando o scan detecta trabalho real e dispara um agente
 - **Multi-repo nativo** — um observador cobre todos os repos das squads configuradas

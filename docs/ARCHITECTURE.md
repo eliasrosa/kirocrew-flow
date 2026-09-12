@@ -1,4 +1,4 @@
-# Kiro Flow — Arquitetura e Modelo de Dados
+# KiroCrew Flow — Arquitetura e Modelo de Dados
 
 ## Visão geral
 
@@ -133,13 +133,13 @@ flow:feature | flow:bug | flow:hotfix
 acao-necessaria | bloqueado | segurar | urgent
 
 # Lock (opcional)
-kf-ativo    # Tem um crew trabalhando agora
+crewflow-ativo    # Tem um crew trabalhando agora
 ```
 
 **Comentário estruturado:**
 ```markdown
 <!-- KIRO-FLOW-STATE -->
-## 🤖 Kiro Flow — Estado
+## 🤖 KiroCrew Flow — Estado
 
 **Workflow:** feature (v1)
 **Nó atual:** implement
@@ -176,17 +176,17 @@ scan_state:
 | Modo | Descrição |
 |------|-----------|
 | **Auto** | Cron roda, scan detecta, dispara automaticamente |
-| **Manual** | Dev controla labels, dá trigger quando quiser (`kiroflow run PROJ-123`) |
+| **Manual** | Dev controla labels, dá trigger quando quiser (`crewflow run PROJ-123`) |
 
 O estado (labels) é o mesmo em ambos os modos. O que muda é quem dispara.
 
 ## Auditoria
 
-Toda ação do Kiro Flow adiciona um comentário na issue:
+Toda ação do KiroCrew Flow adiciona um comentário na issue:
 
 ```markdown
 ---
-🤖 **Kiro Flow** — Implementação iniciada
+🤖 **KiroCrew Flow** — Implementação iniciada
 **Quando:** 2024-01-15 10:30
 **Trigger:** auto
 **Branch:** `release/PROJ-123-feature-name`
