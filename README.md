@@ -1,9 +1,13 @@
-# kirocrew-deployment
+# Kiro Flow
 
-Esteira de desenvolvimento autônoma para o **[Kiro Crew](https://github.com/kirodotdev)**:
-uma vigia zero-token que observa issues marcadas `aguardando-desenvolvimento` em vários repositórios e,
-opcionalmente, dispara uma **sessão de execução one-shot** que implementa a issue,
-abre o PR e mergeia — uma passada, sem loop.
+> **Kiro Flow** (KF) — Gerenciador de fluxos de desenvolvimento para o ecossistema **[Kiro Crew](https://github.com/kirodotdev)**.
+
+Uma esteira de desenvolvimento autônoma com **zero-token no agendamento**: observa issues em múltiplos repositórios e, quando detecta trabalho real, dispara sessões de execução one-shot que implementam, abrem PR e mergeiam.
+
+📚 **Documentação:**
+- [Visão do Projeto](docs/VISION.md)
+- [Arquitetura e Modelo de Dados](docs/ARCHITECTURE.md)
+- [Roadmap](docs/ROADMAP.md)
 
 > ⚠️ **Não é standalone.** Depende do Kiro Crew rodando na máquina: usa o loopback
 > interno do gateway (`POST /api/chat`) e o formato de *cron de script* do Kiro Crew.
