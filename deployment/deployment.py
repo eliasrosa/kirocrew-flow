@@ -128,39 +128,6 @@ def _state_file(repo):
     return os.path.join(_state_dir(), "ready-" + repo.replace("/", "__") + ".json")
 
 
-_DEFAULT_BRANCH_CACHE = {}
-
-
-def _default_branch(repo, cfg=None):
-    """Branch base do repo, na ordem: config explícita → API do GitHub → 'main'.
-
-    A esteira é multi-repo e cada repo pode ter uma base diferente (`main`,
-    `master`, `develop`), então o nome NÃO pode ser fixo. Resultado em cache
-    por repo: uma chamada `gh` por ciclo de scan, não uma por issue.
-    """
-    override = ((cfg or {}).get("base_branches") or {}).get(repo)
-    if override:
-        return override
-
-    if repo in _DEFAULT_BRANCH_CACHE:
-        return _DEFAULT_BRANCH_CACHE[repo]
-
-    branch = "main"  # fallback: não trava o dispatch se a API falhar
-    try:
-        out = subprocess.run(
-            ["gh", "repo", "view", repo, "--json", "defaultBranchRef",
-             "--jq", ".defaultBranchRef.name"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            branch = out.stdout.strip()
-    except Exception:
-        pass
-
-    _DEFAULT_BRANCH_CACHE[repo] = branch
-    return branch
-
-
 def _ready_issues(repo):
     out = subprocess.run(
         ["gh", "issue", "list", "--repo", repo, "--state", "open",
@@ -217,7 +184,6 @@ def _dispatch_prompt(repo, issue, cfg):
     vault = cfg.get("vault_root") or ""
     dev_root = cfg.get("dev_root") or os.path.expanduser("~/dev")
     chat_id = cfg.get("notify_chat_id") or ""
-    base_branch = _default_branch(repo, cfg)
     vault_step = ""
     if vault:
         vault_step = (
@@ -244,10 +210,13 @@ def _dispatch_prompt(repo, issue, cfg):
         "2. ESCOPO: se a issue exige decisão de design não-tomada ou é vaga, NÃO implemente — "
         f"comente, marque `{LABEL_BLOCKED}`, avise e ENCERRE.\n"
         f"3. Marque `{LABEL_DEV}` + `{LABEL_RUNNING}`. NÃO faça `git clone`. Use o clone em `{dev_root}/{short}` "
-        f"como base e crie um WORKTREE ISOLADO:\n"
+        f"como base e crie um WORKTREE ISOLADO.\n"
+        f"   A branch base é a DEFAULT DO REPO — descubra, não presuma (pode ser "
+        f"`main`, `master` ou `develop`):\n"
+        f"   `BASE=$(gh repo view {repo} --json defaultBranchRef --jq .defaultBranchRef.name)`\n"
         f"   `cd {dev_root}/{short} && git fetch origin && git worktree add -b "
         f"feat/issue-{issue['number']} {dev_root}/.esteira-worktrees/{short}-{issue['number']} "
-        f"origin/{base_branch}`\n"
+        f"\"origin/$BASE\"`\n"
         "   Trabalhe DENTRO do worktree; remova-o ao fim (`git worktree remove --force ...`). "
         "NUNCA toque em outros worktrees/branches.\n"
         "4. Implemente EXATAMENTE o escopo — nada além.\n"
