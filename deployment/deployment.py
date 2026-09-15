@@ -60,29 +60,61 @@ def _load_config():
 
 
 def _mini_yaml(path):
-    """Parser YAML minimalista: chaves escalares + listas simples (- item)."""
-    cfg, cur_list_key = {}, None
+    """Parser YAML minimalista: escalares, listas simples (- item) e
+    mapeamentos aninhados de UM nível (chave: + linhas indentadas `k: v`).
+
+    Usado só quando PyYAML não está disponível. Um bloco indentado começa como
+    lista e é promovido a dict no primeiro `k: v` que aparecer — assim
+    `repos:` (lista) e `workflow_params:` (dict) convivem sem declaração prévia.
+    """
+    cfg, cur_key = {}, None
+
+    def _coerce(val):
+        if val.lower() in ("true", "false"):
+            return val.lower() == "true"
+        if val.isdigit():
+            return int(val)
+        return val
+
     with open(path) as f:
         for raw in f:
             line = raw.split("#", 1)[0].rstrip()
             if not line.strip():
                 continue
-            if line.lstrip().startswith("- ") and cur_list_key:
-                cfg[cur_list_key].append(line.lstrip()[2:].strip().strip('"\''))
+
+            indented = line.startswith((" ", "\t"))
+            stripped = line.strip()
+
+            # item de lista
+            if stripped.startswith("- ") and cur_key:
+                if isinstance(cfg.get(cur_key), list):
+                    cfg[cur_key].append(stripped[2:].strip().strip('"\''))
                 continue
-            if ":" in line and not line.startswith(" "):
+
+            # `k: v` indentado → entrada de mapeamento aninhado
+            if indented and ":" in stripped and cur_key:
+                if not isinstance(cfg.get(cur_key), dict):
+                    if cfg.get(cur_key):  # já tem itens de lista: não converte
+                        continue
+                    cfg[cur_key] = {}
+                k, _, v = stripped.partition(":")
+                v = v.strip().strip('"\'')
+                if v != "":
+                    cfg[cur_key][k.strip().strip('"\'')] = _coerce(v)
+                continue
+
+            # chave de topo
+            if ":" in line and not indented:
                 key, _, val = line.partition(":")
-                key, val = key.strip(), val.strip().strip('"\'')
-                if val == "":
-                    cfg[key], cur_list_key = [], key
+                key, raw_val = key.strip(), val.strip()
+                val = raw_val.strip('"\'')
+                # `k: ""` é string vazia; `k:` nua abre bloco (lista ou dict)
+                quoted_empty = val == "" and raw_val in ('""', "''")
+                if val == "" and not quoted_empty:
+                    cfg[key], cur_key = [], key   # lista até prova em contrário
                 else:
-                    cur_list_key = None
-                    if val.lower() in ("true", "false"):
-                        cfg[key] = val.lower() == "true"
-                    elif val.isdigit():
-                        cfg[key] = int(val)
-                    else:
-                        cfg[key] = val
+                    cur_key = None
+                    cfg[key] = "" if quoted_empty else _coerce(val)
     return cfg
 
 
@@ -94,6 +126,39 @@ def _state_dir():
 
 def _state_file(repo):
     return os.path.join(_state_dir(), "ready-" + repo.replace("/", "__") + ".json")
+
+
+_DEFAULT_BRANCH_CACHE = {}
+
+
+def _default_branch(repo, cfg=None):
+    """Branch base do repo, na ordem: config explícita → API do GitHub → 'main'.
+
+    A esteira é multi-repo e cada repo pode ter uma base diferente (`main`,
+    `master`, `develop`), então o nome NÃO pode ser fixo. Resultado em cache
+    por repo: uma chamada `gh` por ciclo de scan, não uma por issue.
+    """
+    override = ((cfg or {}).get("base_branches") or {}).get(repo)
+    if override:
+        return override
+
+    if repo in _DEFAULT_BRANCH_CACHE:
+        return _DEFAULT_BRANCH_CACHE[repo]
+
+    branch = "main"  # fallback: não trava o dispatch se a API falhar
+    try:
+        out = subprocess.run(
+            ["gh", "repo", "view", repo, "--json", "defaultBranchRef",
+             "--jq", ".defaultBranchRef.name"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            branch = out.stdout.strip()
+    except Exception:
+        pass
+
+    _DEFAULT_BRANCH_CACHE[repo] = branch
+    return branch
 
 
 def _ready_issues(repo):
@@ -152,6 +217,7 @@ def _dispatch_prompt(repo, issue, cfg):
     vault = cfg.get("vault_root") or ""
     dev_root = cfg.get("dev_root") or os.path.expanduser("~/dev")
     chat_id = cfg.get("notify_chat_id") or ""
+    base_branch = _default_branch(repo, cfg)
     vault_step = ""
     if vault:
         vault_step = (
@@ -181,7 +247,7 @@ def _dispatch_prompt(repo, issue, cfg):
         f"como base e crie um WORKTREE ISOLADO:\n"
         f"   `cd {dev_root}/{short} && git fetch origin && git worktree add -b "
         f"feat/issue-{issue['number']} {dev_root}/.esteira-worktrees/{short}-{issue['number']} "
-        "origin/main`\n"
+        f"origin/{base_branch}`\n"
         "   Trabalhe DENTRO do worktree; remova-o ao fim (`git worktree remove --force ...`). "
         "NUNCA toque em outros worktrees/branches.\n"
         "4. Implemente EXATAMENTE o escopo — nada além.\n"

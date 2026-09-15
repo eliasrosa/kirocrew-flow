@@ -28,6 +28,13 @@ workflow_params:
   review_position: before_qa       # before_qa (Versão C) | after_qa (A) | parallel_qa (B)
   deploy_hml_mode: manual          # manual | auto (futuro)
 
+# ── Branch base por repo (opcional) ───────────────────────────────────────
+# Por padrão a esteira DETECTA a branch default de cada repo via `gh`. Só
+# preencha aqui se a base de trabalho for diferente da branch default
+# (ex: fluxo com `develop`). Chave = owner/repo, valor = nome da branch.
+base_branches:
+  # owner/repo-a: develop
+
 # Limites de segurança
 max_concurrent: 2        # máx de sessões da esteira rodando ao mesmo tempo (global)
 max_turns_per_task: 60   # teto duro de turnos por sessão disparada
