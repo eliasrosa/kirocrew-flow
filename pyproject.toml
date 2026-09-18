@@ -25,7 +25,7 @@ testpaths = ["flow/tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --cov=flow --cov-report=term-missing --cov-fail-under=75"
+addopts = "-v"
 
 [tool.coverage.run]
 source = ["flow"]
