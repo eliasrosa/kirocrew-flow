@@ -132,6 +132,27 @@ def update_issue_comment(owner_repo: str, comment_id: int, body: str) -> dict:
     ]))
 
 
+def delete_issue_comment(owner_repo: str, comment_id: int) -> None:
+    """Deleta um comentário de issue pelo ID.
+
+    Silencioso se o comentário não existir (404 ignorado).
+    """
+    import subprocess as _sp
+    result = _sp.run(
+        ["gh", "api", f"repos/{owner_repo}/issues/comments/{comment_id}",
+         "--method", "DELETE"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "404" in stderr or "Not Found" in stderr.lower():
+            return  # já deletado — não é erro
+        raise ProviderError(f"delete_issue_comment {comment_id}: {stderr}")
+
+
 def get_pr_for_issue(owner_repo: str, issue_number: int) -> dict | None:
     """Retorna o PR aberto que fecha a issue dada, ou None se não existir.
 
