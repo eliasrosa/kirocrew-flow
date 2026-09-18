@@ -1,0 +1,7 @@
+{
+  "task_id": "task-consolidate-reviewer-gate",
+  "task_description": "Issue #88 (Fase 2 / BO #3): consolidate code review into a single review gate that validates the whole pipeline (CI green) AND the PR comments (not just the diff), always posts the complete result to both the PR and the responsible issue (what was done + link + full info), and unlocks the approve/merge path (applies crewflow:reviewed enabling merge per BO #5) only when the pipeline is green and comments are resolved. Includes tests for CI red / pending comments / all green, plus README and steering updates.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null
+}

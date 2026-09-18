@@ -1,0 +1,26 @@
+{
+  "id": "FEAT-003",
+  "type": "docs",
+  "description": "Update README.md and the steering files (.kiro/steering/fluxo.md and .kiro/steering/arquitetura.md) to describe the consolidated review gate: the review now validates the whole pipeline (CI green) AND PR comments (not just the diff), always posts the complete result to both the PR and the issue, and only unlocks approve/merge (crewflow:reviewed) when the pipeline is green and comments are resolved. This satisfies the 'README + steering updated' acceptance criterion. Depends on FEAT-002 (document the behavior actually implemented).",
+  "status": "pending",
+  "steps": [
+    "README.md: In the section describing crewflow:reviewed and/or 'Como funciona'/'Fluxos', clarify that the automated code review is a single consolidated gate that checks CI (pipeline) + PR comments + diff, posts the complete result to both PR and issue, and applies crewflow:reviewed (enabling merge) only when the pipeline is green and comments are resolved. Keep the existing 'Merge é SEMPRE manual' principle intact and consistent.",
+    ".kiro/steering/fluxo.md: Update the 'Lock anti-loop: crewflow:reviewed' section and the Versao-C flowchart/GATE 2 description so the review gate reflects: validates whole pipeline (CI verde) E comentarios da PR resolvidos; posta resultado completo na PR e na issue; so destrava para approve/merge com pipeline verde E comentarios resolvidos. Update the crons-por-estagio table note if needed (run_merge must not merge on red CI).",
+    ".kiro/steering/arquitetura.md: Note the new pieces added in FEAT-002 — the get_pr_checks_status transport function (+ github_client wrapper), the _check_pr_ci deployment helper, the ReviewerResult fields ci_green/unresolved_comments and their is_auto_mergeable semantics, and the pr_ci_green injected parameter on executor.decide() — reinforcing that CI status is INJECTED (domain stays I/O-free). Keep the test count / coverage sentence consistent with reality (adjust if the phrasing references an exact number that changed).",
+    "Do a consistency pass: ensure no doc states that review validates 'only the diff' or that crewflow:reviewed is applied without CI/comment checks. Ensure the em-dash policy of the repo is respected (match the surrounding Portuguese prose style already used in the files).",
+    "Sanity-check that the docs match the code: the label names (crewflow:reviewed, crewflow:changes-requested), function names, and behavior described must match what FEAT-002 implemented."
+  ],
+  "acceptance_criteria": [
+    "README.md describes the consolidated review gate (CI + PR comments + complete result to PR and issue + conditional crewflow:reviewed)",
+    ".kiro/steering/fluxo.md crewflow:reviewed / GATE 2 sections reflect the pipeline+comments gate and posting to both places",
+    ".kiro/steering/arquitetura.md documents the new transport/client/deployment/executor/ReviewerResult additions and reiterates domain I/O-free injection",
+    "No documentation still claims review validates only the diff or applies crewflow:reviewed unconditionally",
+    "Docs are internally consistent with the code from FEAT-002"
+  ],
+  "verification": [
+    "grep -rn 'crewflow:reviewed' README.md .kiro/steering/ and confirm descriptions mention pipeline/CI + comments",
+    "python3.12 -m pytest flow/tests/ --cov=flow --cov-fail-under=75 (confirm docs changes did not break any doc-referencing tests, e.g. prompt smoke tests)"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

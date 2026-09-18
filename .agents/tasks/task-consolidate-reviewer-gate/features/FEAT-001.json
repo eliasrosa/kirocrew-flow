@@ -1,0 +1,27 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Establish a green baseline for the KiroCrew Flow project so subsequent work builds on a known-good state. The system default python3 is 3.9 and lacks pytest; the project requires Python 3.12. Use the pyenv shim python3.12.",
+  "status": "completed",
+  "steps": [
+    "Confirm python3.12 is available: run `python3.12 --version` (pyenv shim at /root/.pyenv/shims/python3.12). Do NOT use system python3 (3.9) — it lacks pytest and the project requires >=3.12.",
+    "From repo root /projects/sandbox/kirocrew-flow install dev dependencies: `python3.12 -m pip install -e '.[dev]'` (installs pytest, pytest-cov, pytest-asyncio, mypy, ruff, pyyaml). Network is OPEN_INTERNET so pip install works.",
+    "Run the linter: `python3.12 -m ruff check flow/` and confirm zero warnings.",
+    "Run the domain boundary test: `python3.12 -m pytest flow/tests/test_domain_boundary.py -v` and confirm it passes.",
+    "Run the full suite with coverage: `python3.12 -m pytest flow/tests/ --cov=flow --cov-report=term-missing --cov-fail-under=75` and confirm all tests pass and coverage is >=75%.",
+    "Record the baseline test count and coverage percentage in the feature findings so later features can detect regressions."
+  ],
+  "acceptance_criteria": [
+    "`python3.12 -m pip install -e '.[dev]'` completes successfully",
+    "`python3.12 -m ruff check flow/` reports no issues",
+    "`python3.12 -m pytest flow/tests/ --cov=flow --cov-fail-under=75` passes with all tests green",
+    "Baseline test count and coverage are recorded in findings"
+  ],
+  "verification": [
+    "python3.12 -m ruff check flow/",
+    "python3.12 -m mypy flow/ --ignore-missing-imports",
+    "python3.12 -m pytest flow/tests/ --cov=flow --cov-report=term-missing --cov-fail-under=75"
+  ],
+  "blocked_reason": null,
+  "findings": "Baseline established with python3.12 (3.12.13, pyenv shim). `python3.12 -m pip install -e '.[dev]'` succeeded (pytest 9.1.1, pytest-cov 7.1.0, pytest-asyncio 1.4.0, mypy 2.3.1, ruff 0.16.8, pyyaml 6.0.3). VERIFICATION RESULTS: ruff check flow/ => 'All checks passed!' (0 warnings). mypy flow/ --ignore-missing-imports => 'Success: no issues found in 47 source files'. test_domain_boundary.py => 4 passed. FULL SUITE: 499 tests collected; 498 passed, 1 failed; coverage 85.81% (well above the --cov-fail-under=75 gate; gate reports 'Required test coverage of 75% reached'). BASELINE TEST COUNT = 499 (498 pass). BASELINE COVERAGE = 85.81%. KNOWN ENVIRONMENT QUIRK (NOT a code defect, NOT a regression): the single failing test flow/tests/test_prompts_loader.py::TestRenderPromptFallback::test_template_corrompido_ilegivel_usa_fallback relies on OS file-permission enforcement (it chmod 0o000 a file and expects the read to fail so render_prompt uses the fallback). pytest runs as root (uid 0) in this sandbox, and root bypasses DAC read checks, so the file stays readable and the fallback branch is never taken (asserts 'ok' == 'FALLBACK: ok'). PROVEN environmental: running that exact test as the unprivileged 'nobody' user => 1 passed. No source files were modified in this feature (git status shows only untracked .agents/). Later features: treat this ONE failure as pre-existing/environmental (root-only); the expected clean-baseline count is 498 passed + 1 root-env failure, or 499 passed when run non-root."
+}
