@@ -131,6 +131,15 @@ def get_pr_for_issue(project: str, issue_number: int) -> dict | None:
     return transport.get_pr_for_issue(project, issue_number)
 
 
+def get_pr_ci_status(project: str, pr_number: int) -> str:
+    """Retorna o estado consolidado da pipeline (CI) do PR.
+
+    Delega ao transport: 'green' | 'red' | 'pending' | 'none'.
+    Lança ``ProviderError`` se a consulta ao ``gh`` falhar.
+    """
+    return transport.get_pr_checks_status(project, pr_number)
+
+
 def merge_pull_request(project: str, pr_number: int, merge_method: str = "squash") -> dict:
     """Faz o merge squash de um PR.
 

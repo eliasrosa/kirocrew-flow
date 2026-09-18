@@ -346,6 +346,152 @@ class TestAutoMergeIntegration:
 
 
 # ---------------------------------------------------------------------------
+# Gate único de review: pipeline vermelha bloqueia o merge automático
+# ---------------------------------------------------------------------------
+
+class TestCiGateBlocksAutoMerge:
+    """CI vermelha impede o MERGE_PR e ainda posta o resultado completo no PR."""
+
+    def _make_ctx(self) -> mock.MagicMock:
+        ctx = mock.MagicMock()
+        ctx._port = 5000
+        ctx._secret = "secret"
+        ctx.job.id = "test-job"
+        return ctx
+
+    def test_ci_vermelha_nao_mergeia_mas_posta_resultado(self) -> None:
+        from flow.audit.state_comment import StateComment, render
+        from flow.domain.gates import WorkItem
+        from flow.domain.state import Modifier, State
+        from flow.scan.scanner import ScanResult
+
+        ctx = self._make_ctx()
+
+        sc = StateComment(
+            workflow="feature (v1)", current_node="review",
+            status="reviewed", repo="owner/repo",
+        )
+        sc.set_reviewer_result(approved=True, comments=[], sha="abc123")
+        state_body = render(sc)
+
+        result = ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/repo/issues/42",
+                title="[owner/repo] Feature X",
+                labels=frozenset(["crewflow:review", "crewflow:reviewed", "crewflow:feature"]),
+            ),
+            current_state=State.REVIEW,
+            modifiers=frozenset([Modifier.REVIEWED]),
+            dispatch_candidate=False,
+            spec_valid=None,
+            changed=True,
+            reason="reviewer aprovado",
+        )
+
+        fake_pr = {"number": 99, "title": "feat: X", "headRefName": "feat/issue-42",
+                   "headRefOid": "abc123", "body": "Closes #42"}
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_minimal_config(auto=True)),
+            mock.patch("deployment.deployment.scan_candidates",
+                       return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_provider_for,
+            mock.patch("flow.adapters.github_client.get_pr_ci_status",
+                       return_value="red") as mock_ci,
+            mock.patch("flow.adapters.github_client.get_pr_for_issue",
+                       return_value=fake_pr),
+            mock.patch("flow.adapters.github_client.merge_pull_request") as mock_merge,
+            mock.patch("flow.adapters.github_client.upsert_pr_review_comment") as mock_pr_post,
+            mock.patch("flow.adapters.github_client.get_state_comment", return_value=state_body),
+            mock.patch("flow.adapters.github_client.upsert_state_comment"),
+            mock.patch("flow.adapters.github_client.add_issue_comment"),
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_state_comment = mock.MagicMock(return_value=state_body)
+            mock_provider.get_pr_for_issue = mock.MagicMock(return_value=fake_pr)
+            mock_provider_for.return_value = mock_provider
+
+            run(ctx)
+
+        # CI foi consultada e o merge NÃO aconteceu
+        assert mock_ci.called
+        mock_merge.assert_not_called()
+        # O resultado completo foi postado no PR (via _post_reviewer_result_on_pr no NOTIFY_HUMAN)
+        assert mock_pr_post.called
+
+    def test_ci_verde_permite_merge(self) -> None:
+        from flow.audit.state_comment import StateComment, render
+        from flow.domain.gates import WorkItem
+        from flow.domain.state import Modifier, State
+        from flow.scan.scanner import ScanResult
+
+        ctx = self._make_ctx()
+
+        sc = StateComment(
+            workflow="feature (v1)", current_node="review",
+            status="reviewed", repo="owner/repo",
+        )
+        sc.set_reviewer_result(approved=True, comments=[], sha="abc123")
+        state_body = render(sc)
+
+        result = ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/repo/issues/42",
+                title="[owner/repo] Feature X",
+                labels=frozenset(["crewflow:review", "crewflow:reviewed", "crewflow:feature"]),
+            ),
+            current_state=State.REVIEW,
+            modifiers=frozenset([Modifier.REVIEWED]),
+            dispatch_candidate=False,
+            spec_valid=None,
+            changed=True,
+            reason="reviewer aprovado",
+        )
+
+        fake_pr = {"number": 99, "title": "feat: X", "headRefName": "feat/issue-42",
+                   "headRefOid": "abc123", "body": "Closes #42"}
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_minimal_config(auto=True)),
+            mock.patch("deployment.deployment.scan_candidates",
+                       return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_provider_for,
+            mock.patch("flow.adapters.github_client.get_pr_ci_status",
+                       return_value="green"),
+            mock.patch("flow.adapters.github_client.get_pr_for_issue",
+                       return_value=fake_pr),
+            mock.patch("flow.adapters.github_client.merge_pull_request",
+                       return_value={"merged": True}) as mock_merge,
+            mock.patch("flow.adapters.github_client.get_work_item",
+                       return_value={"labels": ["crewflow:review", "crewflow:reviewed", "crewflow:feature"]}),
+            mock.patch("flow.adapters.github_client.set_labels"),
+            mock.patch("flow.adapters.github_client.delete_branch"),
+            mock.patch("flow.adapters.github_client.upsert_pr_review_comment"),
+            mock.patch("flow.adapters.github_client.get_state_comment", return_value=state_body),
+            mock.patch("flow.adapters.github_client.upsert_state_comment"),
+            mock.patch("flow.adapters.github_client.add_issue_comment"),
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_state_comment = mock.MagicMock(return_value=state_body)
+            mock_provider.get_pr_for_issue = mock.MagicMock(return_value=fake_pr)
+            mock_provider_for.return_value = mock_provider
+
+            run(ctx)
+
+        mock_merge.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Fix 1 — _repo_has_active / _active_sessions com detecção de locks obsoletos
 # ---------------------------------------------------------------------------
 

@@ -118,6 +118,7 @@ def decide(
     squad: object | None = None,
     pr_head_sha: str | None = None,
     max_review_iterations: int | None = None,
+    pr_ci_green: bool | None = None,
 ) -> ExecutorDecision:
     """Decide o que fazer com a issue.
 
@@ -135,6 +136,13 @@ def decide(
                                não faz I/O.
         max_review_iterations: Teto de ciclos review↔dev antes de escalar para TL.
                                None usa o default de ``gates.DEFAULT_MAX_REVIEW_ITERATIONS``.
+        pr_ci_green:           Estado da pipeline (CI) do PR — True=verde,
+                               False=vermelho/pendente, None=desconhecido.
+                               Injetado pelo driving adapter (sem I/O aqui,
+                               espelhando ``pr_head_sha``). No gate único de
+                               review, uma pipeline vermelha (``False``) impede o
+                               MERGE_PR mesmo que o ReviewerResult diga aprovado.
+                               ``None`` preserva o comportamento atual.
 
     Returns:
         ExecutorDecision com a ação e os metadados para o executor de I/O.
@@ -261,6 +269,19 @@ def decide(
             )
 
         if reviewer_result.is_auto_mergeable:
+            # Gate único de review: a pipeline TEM que estar verde antes do merge.
+            # pr_ci_green é injetado pelo driving adapter (sem I/O aqui).
+            # False = pipeline vermelha/pendente → NÃO mergeia, escala pro TL.
+            # None = desconhecido → não bloqueia (preserva comportamento legado/Jira).
+            if pr_ci_green is False:
+                return ExecutorDecision(
+                    action=ActionKind.NOTIFY_HUMAN,
+                    reason=(
+                        "reviewer aprovou mas a pipeline (CI) está vermelha — "
+                        "merge automático bloqueado, TL deve investigar"
+                    ),
+                    notify_role=HumanRole.TL,
+                )
             return ExecutorDecision(
                 action=ActionKind.MERGE_PR,
                 reason="reviewer aprovado sem pedidos de mudança — merge squash automático",

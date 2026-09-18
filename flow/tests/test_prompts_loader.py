@@ -277,3 +277,26 @@ class TestRealTemplates:
         )
         assert "gh issue view 42 --repo owner/myrepo --comments" in result
         assert "gh pr view 5 --repo owner/myrepo --comments" in result
+
+    def test_reviewer_template_real_valida_ci_e_comentarios(self) -> None:
+        """O gate único de review deve instruir validar a pipeline (CI) e os
+        comentários da PR, e só aplicar crewflow:reviewed quando tudo verde."""
+        result = render_prompt(
+            "reviewer",
+            repo="owner/myrepo",
+            repo_short="myrepo",
+            pr_number="5",
+            issue_number="42",
+            example_approved="",
+            example_changes="",
+            ref_issue="",
+        )
+        # (a) checa CI via gh pr checks / statusCheckRollup
+        assert "gh pr checks 5 --repo owner/myrepo" in result
+        assert "statusCheckRollup" in result
+        # (b) valida comentários resolvidos
+        assert "resolvid" in result.lower()
+        # (c) crewflow:reviewed condicional
+        assert "crewflow:reviewed" in result
+        # (d) resultado completo na PR e na issue
+        assert "COMPLETO" in result or "completo" in result

@@ -288,6 +288,78 @@ class TestReviewerResult:
         assert get_reviewer_result_from_comment(None) is None
         assert get_reviewer_result_from_comment("sem marcador") is None
 
+    # ── Gate único: pipeline (CI) + comentários pendentes ─────────────
+
+    def test_nao_auto_mergeable_ci_vermelha(self) -> None:
+        from flow.audit.state_comment import ReviewerResult
+        rr = ReviewerResult(approved=True, comments=(), ci_green=False)
+        assert rr.is_auto_mergeable is False
+
+    def test_nao_auto_mergeable_comentarios_pendentes(self) -> None:
+        from flow.audit.state_comment import ReviewerResult
+        rr = ReviewerResult(
+            approved=True, comments=(), unresolved_comments=("thread #1 aberta",)
+        )
+        assert rr.is_auto_mergeable is False
+
+    def test_auto_mergeable_tudo_verde(self) -> None:
+        from flow.audit.state_comment import ReviewerResult
+        rr = ReviewerResult(
+            approved=True, comments=(), ci_green=True, unresolved_comments=()
+        )
+        assert rr.is_auto_mergeable is True
+
+    def test_ci_none_nao_bloqueia_auto_merge(self) -> None:
+        """ci_green None (desconhecido) não bloqueia — retrocompatível."""
+        from flow.audit.state_comment import ReviewerResult
+        rr = ReviewerResult(approved=True, comments=(), ci_green=None)
+        assert rr.is_auto_mergeable is True
+
+    def test_roundtrip_ci_green_e_unresolved(self) -> None:
+        sc = _make_sc()
+        sc.set_reviewer_result(
+            approved=False,
+            comments=["Falta teste"],
+            sha="deadbeef",
+            ci_green=False,
+            unresolved_comments=("thread A pendente", "thread B pendente"),
+        )
+        text = render(sc)
+        assert "**Pipeline (CI):** vermelho" in text
+        assert "**Comentários pendentes:**" in text
+        parsed = parse(text)
+        assert parsed is not None
+        rr = parsed.reviewer_result
+        assert rr is not None
+        assert rr.ci_green is False
+        assert rr.unresolved_comments == ("thread A pendente", "thread B pendente")
+        assert rr.comments == ("Falta teste",)
+        assert rr.is_auto_mergeable is False
+
+    def test_roundtrip_ci_verde(self) -> None:
+        sc = _make_sc()
+        sc.set_reviewer_result(approved=True, comments=[], sha="abc", ci_green=True)
+        text = render(sc)
+        assert "**Pipeline (CI):** verde" in text
+        parsed = parse(text)
+        assert parsed is not None
+        rr = parsed.reviewer_result
+        assert rr is not None
+        assert rr.ci_green is True
+        assert rr.unresolved_comments == ()
+        assert rr.is_auto_mergeable is True
+
+    def test_roundtrip_ci_none_rende_nd(self) -> None:
+        sc = _make_sc()
+        sc.set_reviewer_result(approved=True, comments=[], sha="abc")
+        text = render(sc)
+        assert "**Pipeline (CI):** n/d" in text
+        parsed = parse(text)
+        assert parsed is not None
+        rr = parsed.reviewer_result
+        assert rr is not None
+        assert rr.ci_green is None
+
 
 # ---------------------------------------------------------------------------
 # render_pr_review_comment
@@ -324,6 +396,64 @@ class TestRenderPrReviewComment:
         body = render_pr_review_comment(rr, issue_number=1
         )
         assert body.count("\n- ") == 3
+
+    def test_inclui_pipeline_ci_e_link_issue(self) -> None:
+        """PR comment sempre traz o estado da CI e o link para a issue."""
+        from flow.audit.state_comment import ReviewerResult, render_pr_review_comment
+        rr = ReviewerResult(approved=True, comments=(), sha="abc123", ci_green=True)
+        body = render_pr_review_comment(
+            rr, issue_number=73, issue_url="https://github.com/o/r/issues/73"
+        )
+        assert "**Pipeline (CI):** verde" in body
+        assert "[issue #73](https://github.com/o/r/issues/73)" in body
+
+    def test_inclui_comentarios_pendentes(self) -> None:
+        from flow.audit.state_comment import ReviewerResult, render_pr_review_comment
+        rr = ReviewerResult(
+            approved=False,
+            comments=(),
+            ci_green=False,
+            unresolved_comments=("thread aberta em foo.py",),
+        )
+        body = render_pr_review_comment(rr, issue_number=5)
+        assert "**Pipeline (CI):** vermelho" in body
+        assert "### Comentários pendentes" in body
+        assert "- thread aberta em foo.py" in body
+
+
+# ---------------------------------------------------------------------------
+# render_issue_review_result
+# ---------------------------------------------------------------------------
+
+class TestRenderIssueReviewResult:
+    def test_resultado_completo_aprovado(self) -> None:
+        from flow.audit.state_comment import ReviewerResult, render_issue_review_result
+        rr = ReviewerResult(approved=True, comments=(), sha="abc123", ci_green=True)
+        body = render_issue_review_result(
+            rr, pr_number=74, pr_url="https://github.com/o/r/pull/74"
+        )
+        assert "resultado completo" in body.lower()
+        assert "**Resultado:** ✅ Aprovado" in body
+        assert "**Pipeline (CI):** verde" in body
+        assert "[PR #74](https://github.com/o/r/pull/74)" in body
+        assert "`abc123`" in body
+
+    def test_resultado_completo_com_mudancas_e_pendentes(self) -> None:
+        from flow.audit.state_comment import ReviewerResult, render_issue_review_result
+        rr = ReviewerResult(
+            approved=False,
+            comments=("Falta teste",),
+            ci_green=False,
+            unresolved_comments=("thread X",),
+        )
+        body = render_issue_review_result(rr, pr_number=74)
+        assert "**Resultado:** ⚠️ Pedidos de mudança" in body
+        assert "**Pipeline (CI):** vermelho" in body
+        assert "### Pedidos de mudança" in body
+        assert "- Falta teste" in body
+        assert "### Comentários pendentes" in body
+        assert "- thread X" in body
+        assert "PR #74" in body
 
 
 # ---------------------------------------------------------------------------

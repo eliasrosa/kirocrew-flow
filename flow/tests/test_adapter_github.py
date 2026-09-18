@@ -393,3 +393,60 @@ class TestMergePullRequest:
             import pytest
             with pytest.raises(ProviderError, match="checks failing"):
                 github_client.merge_pull_request("owner/repo", 10)
+
+
+class TestGetPrChecksStatus:
+    """get_pr_checks_status reduz o statusCheckRollup a green/red/pending/none."""
+
+    def test_todos_sucesso_retorna_green(self) -> None:
+        rollup = {"statusCheckRollup": [
+            {"status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"state": "SUCCESS"},
+        ]}
+        with mock.patch.object(github_transport, "_run", return_value=rollup):
+            assert github_transport.get_pr_checks_status("owner/repo", 10) == "green"
+
+    def test_qualquer_falha_retorna_red(self) -> None:
+        rollup = {"statusCheckRollup": [
+            {"status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"status": "COMPLETED", "conclusion": "FAILURE"},
+        ]}
+        with mock.patch.object(github_transport, "_run", return_value=rollup):
+            assert github_transport.get_pr_checks_status("owner/repo", 10) == "red"
+
+    def test_commit_status_error_retorna_red(self) -> None:
+        rollup = {"statusCheckRollup": [{"state": "ERROR"}]}
+        with mock.patch.object(github_transport, "_run", return_value=rollup):
+            assert github_transport.get_pr_checks_status("owner/repo", 10) == "red"
+
+    def test_em_andamento_retorna_pending(self) -> None:
+        rollup = {"statusCheckRollup": [
+            {"status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"status": "IN_PROGRESS", "conclusion": None},
+        ]}
+        with mock.patch.object(github_transport, "_run", return_value=rollup):
+            assert github_transport.get_pr_checks_status("owner/repo", 10) == "pending"
+
+    def test_sem_checks_retorna_none(self) -> None:
+        with mock.patch.object(github_transport, "_run", return_value={"statusCheckRollup": []}):
+            assert github_transport.get_pr_checks_status("owner/repo", 10) == "none"
+
+    def test_propaga_provider_error(self) -> None:
+        from flow.ports.issue_provider import ProviderError
+        with mock.patch.object(
+            github_transport, "_run", side_effect=ProviderError("boom")
+        ):
+            import pytest
+            with pytest.raises(ProviderError, match="boom"):
+                github_transport.get_pr_checks_status("owner/repo", 10)
+
+
+class TestGetPrCiStatus:
+    """github_client.get_pr_ci_status delega ao transport."""
+
+    def test_delega_ao_transport(self) -> None:
+        with mock.patch.object(
+            github_transport, "get_pr_checks_status", return_value="green"
+        ) as m:
+            assert github_client.get_pr_ci_status("owner/repo", 10) == "green"
+        m.assert_called_once_with("owner/repo", 10)

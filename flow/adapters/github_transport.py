@@ -196,6 +196,48 @@ def merge_pull_request(owner_repo: str, pr_number: int, merge_method: str = "squ
     ]))
 
 
+def get_pr_checks_status(owner_repo: str, pr_number: int) -> str:
+    """Retorna o estado consolidado da pipeline (CI) de um PR.
+
+    Lê o ``statusCheckRollup`` do PR via ``gh pr view`` e reduz para um único
+    rótulo: 'green' | 'red' | 'pending' | 'none'.
+
+    Semântica da redução (o pior estado domina):
+      - qualquer check com conclusão de falha/cancel/timeout → 'red'
+      - qualquer check ainda em andamento/enfileirado/pendente → 'pending'
+      - todos os checks concluídos com sucesso/neutro → 'green'
+      - sem nenhum check reportado → 'none'
+
+    Lança a família ``ProviderError`` em caso de falha do ``gh`` (via ``_run``).
+    """
+    pr = cast(dict, _run([
+        "pr", "view", str(pr_number),
+        "--repo", owner_repo,
+        "--json", "statusCheckRollup",
+    ]))
+    rollup = pr.get("statusCheckRollup") or []
+    if not rollup:
+        return "none"
+
+    has_pending = False
+    for check in rollup:
+        # GitHub Checks (CheckRun): status + conclusion.
+        # Commit statuses (StatusContext): state (SUCCESS/PENDING/FAILURE/ERROR).
+        status = str(check.get("status") or "").upper()
+        conclusion = str(check.get("conclusion") or "").upper()
+        state = str(check.get("state") or "").upper()
+
+        if conclusion in ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE") \
+                or state in ("FAILURE", "ERROR"):
+            return "red"
+        if status in ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED") \
+                or state == "PENDING" \
+                or (status and status != "COMPLETED"):
+            has_pending = True
+
+    return "pending" if has_pending else "green"
+
+
 def get_pr_comments(owner_repo: str, pr_number: int) -> list:
     """Retorna os comentários (issue comments) de um PR.
 

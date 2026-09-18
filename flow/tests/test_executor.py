@@ -475,3 +475,42 @@ class TestGate2AutoMerge:
         )
         d = decide(r, state_comment=state_comment, pr_head_sha=None)
         assert d.action is ActionKind.MERGE_PR  # sem SHA do PR → não bloqueia
+
+    # ── Gate único: validação da pipeline (CI) ────────────────────────
+
+    def test_ci_vermelha_bloqueia_merge_notifica_tl(self) -> None:
+        """Reviewer aprovado sem comentários MAS pipeline vermelha → NOTIFY_HUMAN TL."""
+        state_comment = self._make_review_result(approved=True, comments=[])
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
+            modifiers={Modifier.REVIEWED},
+        )
+        d = decide(r, state_comment=state_comment, pr_ci_green=False)
+        assert d.action is ActionKind.NOTIFY_HUMAN
+        assert d.notify_role is HumanRole.TL
+        assert "pipeline" in d.reason.lower()
+        assert "vermelha" in d.reason.lower()
+
+    def test_ci_verde_prossegue_merge(self) -> None:
+        """Reviewer aprovado + pipeline verde → MERGE_PR."""
+        state_comment = self._make_review_result(approved=True, comments=[])
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
+            modifiers={Modifier.REVIEWED},
+        )
+        d = decide(r, state_comment=state_comment, pr_ci_green=True)
+        assert d.action is ActionKind.MERGE_PR
+        assert "crewflow:done" in d.add_labels
+
+    def test_ci_desconhecida_preserva_comportamento_legado(self) -> None:
+        """pr_ci_green=None (ex: Jira, CI desconhecida) → MERGE_PR (legado)."""
+        state_comment = self._make_review_result(approved=True, comments=[])
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
+            modifiers={Modifier.REVIEWED},
+        )
+        d = decide(r, state_comment=state_comment, pr_ci_green=None)
+        assert d.action is ActionKind.MERGE_PR  # None não bloqueia

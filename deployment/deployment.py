@@ -707,7 +707,9 @@ def run(ctx: object) -> None:
 
         # Busca o SHA do HEAD do PR quando em review+reviewed para que o
         # executor possa detectar push pós-review sem fazer I/O ele mesmo.
+        # Consulta também o estado da pipeline (CI) para o gate único de review.
         pr_head_sha: str | None = None
+        pr_ci_green: bool | None = None
         if result.current_state is State.REVIEW and Modifier.REVIEWED in result.modifiers:
             import contextlib
             with contextlib.suppress(Exception):
@@ -720,8 +722,12 @@ def run(ctx: object) -> None:
                     _pr = provider.get_pr_for_issue(_repo, _issue_number)
                     if _pr:
                         pr_head_sha = _pr.get("headRefOid") or _pr.get("headRefName")
+                        pr_ci_green = _check_pr_ci(_repo, int(_pr["number"]))
 
-        decision = decide(result, state_comment=state_comment, squad=squad, pr_head_sha=pr_head_sha)
+        decision = decide(
+            result, state_comment=state_comment, squad=squad,
+            pr_head_sha=pr_head_sha, pr_ci_green=pr_ci_green,
+        )
 
         # Loga o template resolvido pelo executor e a ação decidida, para
         # cada issue processada — facilita debugar por que uma issue foi para
@@ -1160,7 +1166,8 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
         "ISSUE: #{{issue_number}}\n"
         "SESSION TITLE: review: {{repo_short}} PR #{{pr_number}} (issue #{{issue_number}})\n"
         "------------ CONTEXT TASK ----------------\n"
-        "Você é um agente de code review ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.\n\n"
+        "Você é um agente de code review ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.\n"
+        "Você é o GATE ÚNICO de review: valida a PIPELINE INTEIRA (CI) E os comentários da PR — não só o diff.\n\n"
         "FLUXO (execute UMA vez, do início ao fim, e PARE):\n"
         "0. TÍTULO: como PRIMEIRA ação, defina o título da sessão = `SESSION TITLE`.\n"
         "1. Leia a issue para ter contexto, incluindo os comentários:\n"
@@ -1169,30 +1176,48 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
         "2. Leia o diff do PR e os comentários do PR:\n"
         "   gh pr diff {{pr_number}} --repo {{repo}}\n"
         "   gh pr view {{pr_number}} --repo {{repo}} --comments\n"
-        "3. Leia os steerings do repo (.kiro/steering/*.md) para entender convenções.\n"
-        "4. Analise: corretude, cobertura de testes, estilo, convenções do projeto.\n"
-        "5. POSTE O RESULTADO DO REVIEW COMO COMENTÁRIO NO PR:\n"
+        "3. VALIDE A PIPELINE (CI) — pré-requisito do approve:\n"
+        "   gh pr checks {{pr_number}} --repo {{repo}}\n"
+        "   gh pr view {{pr_number}} --repo {{repo}} --json statusCheckRollup\n"
+        "   Se QUALQUER check estiver vermelho/falhando (ou pendente), a PR NÃO está\n"
+        "   aprovada — trate como pipeline vermelha e NÃO adicione `crewflow:reviewed`.\n"
+        "4. VALIDE OS COMENTÁRIOS DA PR — confirme que todas as threads de review\n"
+        "   foram resolvidas. Comentário/thread em aberto = pedido de mudança pendente:\n"
+        "   a PR NÃO está aprovada enquanto houver comentário não resolvido.\n"
+        "5. Leia os steerings do repo (.kiro/steering/*.md) para entender convenções.\n"
+        "6. Analise: corretude, cobertura de testes, estilo, convenções do projeto.\n"
+        "7. POSTE O RESULTADO COMPLETO DO REVIEW COMO COMENTÁRIO NO PR:\n"
         "   gh pr comment {{pr_number}} --repo {{repo}} --body \"<corpo do review>\"\n"
-        "   Use EXATAMENTE este formato no corpo (KiroCrew Review).\n"
-        "   Se APROVADO sem comentários (omita a seção `### Pedidos de mudança`):\n"
+        "   Use EXATAMENTE este formato no corpo (KiroCrew Review) — inclua SEMPRE o\n"
+        "   resultado, o reviewer, o estado da pipeline (CI), o SHA, os pedidos de\n"
+        "   mudança, os comentários pendentes e o link para a issue.\n"
+        "   Se APROVADO (CI verde, comentários resolvidos, zero mudanças; omita as\n"
+        "   seções `### Pedidos de mudança` e `### Comentários pendentes`):\n"
         "{{example_approved}}\n"
         "   Se houver pedidos de mudança:\n"
         "{{example_changes}}\n"
-        "6. Registre o resultado no state_comment DA ISSUE com ReviewerResult:\n"
-        "   - Se APROVADO sem comentários: campo `approved: true`, `comments: []`\n"
+        "8. Registre o resultado no state_comment DA ISSUE com ReviewerResult:\n"
+        "   - Se APROVADO: `approved: true`, `comments: []`, `ci_green: true`, `unresolved_comments: []`\n"
         "   - Se tem pedidos de mudança: `approved: false`, `comments: [\"<mudança 1>\", ...]`\n"
+        "   - Se a pipeline está vermelha: `ci_green: false`\n"
+        "   - Se há comentários não resolvidos: liste-os em `unresolved_comments`\n"
         "   Use `upsert_state_comment` para atualizar o bloco <!-- KIRO-FLOW-STATE --> NA ISSUE.\n"
         "   O ReviewerResult deve incluir o SHA atual do HEAD do PR.\n"
         "   IMPORTANTE: o ReviewerResult PERMANECE na issue — é o que o scan lê pra decidir MERGE_PR.\n"
-        "7. Deixe uma referência CURTA na issue #{{issue_number}} apontando pro PR e o status:\n"
-        "   ex.: `{{ref_issue}}` (troque para `pedidos de mudança` se houver comentários).\n"
-        "   NÃO duplique o detalhe dos pedidos de mudança na issue — só o link + status.\n"
-        "8. Se zero comentários: adicione a label `crewflow:reviewed` à issue #{{issue_number}}.\n"
-        "9. Se tem comentários: NÃO adicione `crewflow:reviewed` — o TL decide.\n"
-        "10. ENCERRE.\n\n"
+        "9. POSTE O RESULTADO COMPLETO TAMBÉM NA ISSUE #{{issue_number}} — o que foi\n"
+        "   feito, o link para o PR, o status, o resultado da CI e os comentários.\n"
+        "   Além da referência curta (`{{ref_issue}}`), a issue deve conter a\n"
+        "   informação COMPLETA (a PR e a issue recebem o mesmo resultado completo).\n"
+        "10. Só adicione a label `crewflow:reviewed` à issue #{{issue_number}} quando:\n"
+        "    (a) a pipeline (CI) estiver VERDE, (b) todos os comentários da PR\n"
+        "    estiverem resolvidos E (c) houver ZERO pedidos de mudança. Destrava o merge (BO #5).\n"
+        "11. Se CI vermelha, comentários pendentes ou pedidos de mudança: NÃO adicione\n"
+        "    `crewflow:reviewed` — o TL decide.\n"
+        "12. ENCERRE.\n\n"
         "REGRAS CRÍTICAS:\n"
         "- UMA passada. Terminou, acabou. NÃO entre em loop.\n"
         "- NUNCA mergeie. NUNCA faça deploy.\n"
+        "- Pipeline vermelha = NÃO aprovado. Comentário não resolvido = NÃO aprovado.\n"
         "- Seja objetivo — aponte problemas concretos, não estilo pessoal.\n"
         "------------------------------------------"
     )
@@ -1490,6 +1515,48 @@ def _dispatch_reviewer(
         )
 
 
+def _check_pr_ci(repo: str, pr_number: int) -> bool | None:
+    """Consulta o estado da pipeline (CI) do PR para o gate único de review.
+
+    Driving-adapter helper: chama ``github_client.get_pr_ci_status`` e reduz o
+    rótulo a um ``bool | None`` que o ``decide()`` injeta como ``pr_ci_green``:
+
+      - 'green'          → True  (pipeline verde, pode mergear)
+      - 'red' / 'pending'→ False (bloqueia o merge automático — distingue no log)
+      - 'none' / erro    → None  (desconhecido, não bloqueia — legado/sem CI)
+
+    Nunca propaga exceção: falha de I/O degrada para ``None`` (não bloqueia).
+    """
+    from flow.adapters import github_client as gh_client
+    from flow.ports.issue_provider import ProviderError
+
+    try:
+        status = gh_client.get_pr_ci_status(repo, pr_number)
+    except ProviderError as exc:
+        logger.warning(
+            "deployment: _check_pr_ci: falha ao consultar CI de %s PR#%s: %s — tratando como desconhecido",
+            repo, pr_number, exc,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "deployment: _check_pr_ci: erro inesperado ao consultar CI de %s PR#%s: %s",
+            repo, pr_number, exc,
+        )
+        return None
+
+    if status == "green":
+        return True
+    if status in ("red", "pending"):
+        logger.info(
+            "deployment: _check_pr_ci: pipeline de %s PR#%s = %s — merge automático bloqueado",
+            repo, pr_number, status,
+        )
+        return False
+    # 'none' ou desconhecido → sem informação de CI, não bloqueia
+    return None
+
+
 def _post_reviewer_result_on_pr(
     repo: str,
     issue_number: int,
@@ -1546,10 +1613,17 @@ def _update_issue_with_pr_ref(
     pr_number: int,
     reviewer_result: object,
 ) -> None:
-    """Adiciona referência curta ao PR no comentário de estado da issue.
+    """Garante que a issue receba o resultado COMPLETO do review + link para o PR.
 
-    Adiciona linha no histórico indicando onde o review foi postado.
-    Não altera o ReviewerResult — o scan continua lendo dali.
+    O gate único de review exige que a issue tenha a informação completa (o que
+    foi feito + link + status + CI + comentários), não só uma referência curta.
+    Este helper:
+      - mantém o ReviewerResult COMPLETO (com ci_green/unresolved) no state comment
+        via ``render()`` — é o que o scan lê para decidir MERGE_PR;
+      - adiciona uma linha no histórico apontando o PR;
+      - posta um comentário separado na issue com o resultado completo via
+        ``render_issue_review_result()`` (a fonte autoritativa da completude
+        do lado da issue).
     """
     import contextlib
 
@@ -1557,27 +1631,29 @@ def _update_issue_with_pr_ref(
     from flow.audit.state_comment import ReviewerResult
     from flow.audit.state_comment import parse as _parse
     from flow.audit.state_comment import render as _render
+    from flow.audit.state_comment import render_issue_review_result
 
     rr: ReviewerResult = reviewer_result  # type: ignore[assignment]
-    state_comment_body = gh_client.get_state_comment(repo, str(issue_number))
-    if state_comment_body is None:
-        return
-
-    sc = _parse(state_comment_body)
-    if sc is None:
-        return
-
-    status_str = "aprovado" if rr.approved else "pedidos de mudança"
     pr_url = f"https://github.com/{repo}/pull/{pr_number}"
-    sc.add_transition(
-        from_state="review",
-        to_state=f"review (resultado no [PR #{pr_number}]({pr_url}))",
-        actor="kiro-reviewer",
-    )
-    sc.status = f"review postado em PR #{pr_number} — {status_str}"
 
+    state_comment_body = gh_client.get_state_comment(repo, str(issue_number))
+    if state_comment_body is not None:
+        sc = _parse(state_comment_body)
+        if sc is not None:
+            status_str = "aprovado" if rr.approved else "pedidos de mudança"
+            sc.add_transition(
+                from_state="review",
+                to_state=f"review (resultado no [PR #{pr_number}]({pr_url}))",
+                actor="kiro-reviewer",
+            )
+            sc.status = f"review postado em PR #{pr_number} — {status_str}"
+            with contextlib.suppress(Exception):
+                gh_client.upsert_state_comment(repo, str(issue_number), _render(sc))
+
+    # Resultado COMPLETO na issue (o que foi feito + link + status + CI + comentários)
+    full_result = render_issue_review_result(rr, pr_number, pr_url)
     with contextlib.suppress(Exception):
-        gh_client.upsert_state_comment(repo, str(issue_number), _render(sc))
+        gh_client.add_issue_comment(repo, issue_number, full_result)
 
 
 def _notify_reviewers(ctx: object, items: list, chat_id: str) -> None:
@@ -1880,6 +1956,7 @@ def _run_stage(ctx: object, stage: str) -> None:
                 )
 
         pr_head_sha: str | None = None
+        pr_ci_green: bool | None = None
         if result.current_state is State.REVIEW and Modifier.REVIEWED in result.modifiers:
             import contextlib
             with contextlib.suppress(Exception):
@@ -1892,8 +1969,12 @@ def _run_stage(ctx: object, stage: str) -> None:
                     _pr = provider.get_pr_for_issue(_repo, _issue_number)
                     if _pr:
                         pr_head_sha = _pr.get("headRefOid") or _pr.get("headRefName")
+                        pr_ci_green = _check_pr_ci(_repo, int(_pr["number"]))
 
-        decision = decide(result, state_comment=state_comment, squad=squad, pr_head_sha=pr_head_sha)
+        decision = decide(
+            result, state_comment=state_comment, squad=squad,
+            pr_head_sha=pr_head_sha, pr_ci_green=pr_ci_green,
+        )
 
         template = resolve_template(result, squad)
         logger.info(

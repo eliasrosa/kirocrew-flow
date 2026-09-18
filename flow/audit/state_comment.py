@@ -72,21 +72,40 @@ class ApprovalEntry:
 class ReviewerResult:
     """Resultado estruturado do kiro-reviewer.
 
-    ``approved`` — True se o reviewer não pediu mudanças.
-    ``comments`` — lista de pedidos de mudança (strings curtas).
-    ``sha``       — SHA do commit do PR no momento da análise (anti-loop).
-    ``reviewer``  — identificador do agente que fez a análise.
+    ``approved``            — True se o reviewer não pediu mudanças.
+    ``comments``            — lista de pedidos de mudança (strings curtas).
+    ``sha``                 — SHA do commit do PR no momento da análise (anti-loop).
+    ``reviewer``            — identificador do agente que fez a análise.
+    ``ci_green``            — resultado da pipeline (CI) no momento da análise:
+                              True = verde, False = vermelho/pendente, None =
+                              desconhecido/não avaliado (ex: resultado legado ou
+                              Jira sem CI). ``None`` NÃO bloqueia o auto-merge,
+                              espelhando a tolerância do SHA a informação ausente.
+    ``unresolved_comments`` — threads/comentários de review da PR ainda abertos.
+                              Quando não vazio, o resultado NÃO é auto-mergeável.
     """
 
     approved: bool
     comments: tuple[str, ...]
     sha: str = ""
     reviewer: str = "kiro-reviewer"
+    ci_green: bool | None = None
+    unresolved_comments: tuple[str, ...] = ()
 
     @property
     def is_auto_mergeable(self) -> bool:
-        """True se aprovado sem nenhum pedido de mudança (critério zero-comentários)."""
-        return self.approved and len(self.comments) == 0
+        """True só quando o gate único de review está 100% verde.
+
+        Requer: aprovado E zero pedidos de mudança E pipeline não-vermelha
+        (``ci_green is not False`` — ``None`` = desconhecido não bloqueia) E
+        zero comentários pendentes na PR.
+        """
+        return (
+            self.approved
+            and len(self.comments) == 0
+            and self.ci_green is not False
+            and len(self.unresolved_comments) == 0
+        )
 
 
 @dataclass(slots=True)
@@ -150,13 +169,21 @@ class StateComment:
         comments: list[str],
         sha: str = "",
         reviewer: str = "kiro-reviewer",
+        ci_green: bool | None = None,
+        unresolved_comments: tuple[str, ...] | list[str] = (),
     ) -> None:
-        """Registra o resultado do kiro-reviewer no comentário de estado."""
+        """Registra o resultado do kiro-reviewer no comentário de estado.
+
+        ``ci_green`` e ``unresolved_comments`` são opcionais (defaults
+        retrocompatíveis) — o gate único de review os consolida no ReviewerResult.
+        """
         self.reviewer_result = ReviewerResult(
             approved=approved,
             comments=tuple(comments),
             sha=sha,
             reviewer=reviewer,
+            ci_green=ci_green,
+            unresolved_comments=tuple(unresolved_comments),
         )
 
     def get_reviewer_result(self) -> ReviewerResult | None:
@@ -167,6 +194,25 @@ class StateComment:
 # ---------------------------------------------------------------------------
 # Renderizador
 # ---------------------------------------------------------------------------
+
+def _ci_label(ci_green: bool | None) -> str:
+    """Rótulo legível do estado da pipeline no comentário renderizado."""
+    if ci_green is True:
+        return "verde"
+    if ci_green is False:
+        return "vermelho"
+    return "n/d"
+
+
+def _parse_ci_label(value: str) -> bool | None:
+    """Inverso de ``_ci_label``: rótulo → bool | None (round-trip)."""
+    v = value.strip().lower()
+    if v == "verde":
+        return True
+    if v == "vermelho":
+        return False
+    return None
+
 
 def render(sc: StateComment) -> str:
     """Gera o texto do comentário de estado."""
@@ -223,6 +269,7 @@ def render(sc: StateComment) -> str:
             f"**Status:** {status_str}",
             f"**Reviewer:** {rr.reviewer}",
             f"**SHA:** {rr.sha}" if rr.sha else "",
+            f"**Pipeline (CI):** {_ci_label(rr.ci_green)}",
             f"**Auto-merge:** {'sim' if rr.is_auto_mergeable else 'não'}",
         ]
         # Remove linha vazia do SHA quando sha é vazio
@@ -231,6 +278,11 @@ def render(sc: StateComment) -> str:
             lines.append("")
             lines.append("**Pedidos de mudança:**")
             for c in rr.comments:
+                lines.append(f"- {c}")
+        if rr.unresolved_comments:
+            lines.append("")
+            lines.append("**Comentários pendentes:**")
+            for c in rr.unresolved_comments:
                 lines.append(f"- {c}")
         lines.append("")
 
@@ -345,21 +397,27 @@ def _parse_block(block: str) -> StateComment:
     rev_approved: bool | None = None
     rev_sha = ""
     rev_reviewer = "kiro-reviewer"
+    rev_ci_green: bool | None = None
     rev_comments: list[str] = []
+    rev_unresolved: list[str] = []
     in_comments_list = False
+    in_unresolved_list = False
     for line in lines:
         if "### Resultado do Reviewer" in line:
             in_reviewer = True
             in_comments_list = False
+            in_unresolved_list = False
             continue
         if in_reviewer:
             if line.startswith("###"):
                 in_reviewer = False
                 in_comments_list = False
+                in_unresolved_list = False
                 continue
             if "**Status:**" in line:
                 rev_approved = "✅" in line or "aprovado" in line.lower()
                 in_comments_list = False
+                in_unresolved_list = False
                 continue
             if "**Reviewer:**" in line:
                 rev_reviewer = line.split("**Reviewer:**", 1)[1].strip()
@@ -367,17 +425,29 @@ def _parse_block(block: str) -> StateComment:
             if "**SHA:**" in line:
                 rev_sha = line.split("**SHA:**", 1)[1].strip()
                 continue
+            if "**Pipeline (CI):**" in line:
+                rev_ci_green = _parse_ci_label(line.split("**Pipeline (CI):**", 1)[1])
+                continue
             if "**Pedidos de mudança:**" in line:
                 in_comments_list = True
+                in_unresolved_list = False
+                continue
+            if "**Comentários pendentes:**" in line:
+                in_unresolved_list = True
+                in_comments_list = False
                 continue
             if in_comments_list and line.startswith("- "):
                 rev_comments.append(line[2:].strip())
+            elif in_unresolved_list and line.startswith("- "):
+                rev_unresolved.append(line[2:].strip())
     if rev_approved is not None:
         sc.reviewer_result = ReviewerResult(
             approved=rev_approved,
             comments=tuple(rev_comments),
             sha=rev_sha,
             reviewer=rev_reviewer,
+            ci_green=rev_ci_green,
+            unresolved_comments=tuple(rev_unresolved),
         )
 
     return sc
@@ -507,6 +577,7 @@ def render_pr_review_comment(
         "",
         f"**Resultado:** {status_str}",
         f"**Reviewer:** {reviewer_result.reviewer}",
+        f"**Pipeline (CI):** {_ci_label(reviewer_result.ci_green)}",
     ]
     if reviewer_result.sha:
         lines.append(f"**SHA:** `{reviewer_result.sha}`")
@@ -519,10 +590,62 @@ def render_pr_review_comment(
         for c in reviewer_result.comments:
             lines.append(f"- {c}")
 
+    if reviewer_result.unresolved_comments:
+        lines += [
+            "",
+            "### Comentários pendentes",
+        ]
+        for c in reviewer_result.unresolved_comments:
+            lines.append(f"- {c}")
+
     lines.append("")
     ref = f"issue #{issue_number}" if issue_number else "a issue"
     if issue_url:
         ref = f"[issue #{issue_number}]({issue_url})" if issue_number else f"[a issue]({issue_url})"
     lines.append(f"*Reviewer automático — {ref}*")
     lines.append(PR_REVIEW_COMMENT_CLOSE)
+    return "\n".join(lines)
+
+
+def render_issue_review_result(
+    reviewer_result: ReviewerResult,
+    pr_number: int,
+    pr_url: str | None = None,
+) -> str:
+    """Renderiza o resultado COMPLETO do review para postar/embutir NA ISSUE.
+
+    Ao contrário de ``render_issue_pr_reference()`` (referência curta: só link +
+    status), esta função é a AUTORITATIVA para a completude exigida pelo gate
+    único de review: descreve o que foi feito, o link para o PR, o status, o
+    resultado da pipeline (CI), os pedidos de mudança e os comentários pendentes.
+
+    Use esta função quando a issue precisa da informação completa (critério de
+    aceite: "resultado completo postado na PR e na issue"). Mantenha
+    ``render_issue_pr_reference()`` apenas para os chamadores de referência curta.
+
+    Puro — sem I/O.
+    """
+    status_str = "✅ Aprovado" if reviewer_result.approved else "⚠️ Pedidos de mudança"
+    pr_ref = f"[PR #{pr_number}]({pr_url})" if pr_url else f"PR #{pr_number}"
+    lines: list[str] = [
+        "## 🤖 KiroCrew Review — resultado completo",
+        "",
+        f"**Resultado:** {status_str}",
+        f"**Reviewer:** {reviewer_result.reviewer}",
+        f"**Pipeline (CI):** {_ci_label(reviewer_result.ci_green)}",
+        f"**PR:** {pr_ref}",
+    ]
+    if reviewer_result.sha:
+        lines.append(f"**SHA:** `{reviewer_result.sha}`")
+
+    if reviewer_result.comments:
+        lines += ["", "### Pedidos de mudança"]
+        for c in reviewer_result.comments:
+            lines.append(f"- {c}")
+
+    if reviewer_result.unresolved_comments:
+        lines += ["", "### Comentários pendentes"]
+        for c in reviewer_result.unresolved_comments:
+            lines.append(f"- {c}")
+
     return "\n".join(lines)
