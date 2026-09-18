@@ -203,13 +203,6 @@ def decide(
                 notify_role=HumanRole.TL,
             )
 
-    # ── Ciclo de re-trabalho pós-review: crewflow:changes-requested ───
-    # Quando o reviewer pediu mudança (marcou changes-requested), o motor
-    # despacha uma sessão dev de re-trabalho que:
-    #   - lê os pedidos de mudança do PR
-    #   - aplica os ajustes na MESMA branch/PR
-    #   - volta a issue para crewflow:review
-    # Antes de despachar, verifica o teto de iterações (anti-loop infinito).
     # ── Cron de conflito: crewflow:conflito ───────────────────────────
     # Quando a PR tem conflito de merge ou base desatualizada, o reviewer
     # (ou qualquer estágio) aplica crewflow:conflito. O cron de conflito
