@@ -47,7 +47,7 @@ from flow.audit.state_comment import (  # noqa: E402
 )
 from flow.ports.issue_provider import provider_for  # noqa: E402
 from flow.scan.cache import open_cache  # noqa: E402
-from flow.scan.scanner import scan_candidates  # noqa: E402
+from flow.scan.scanner import ScanResult, scan_candidates  # noqa: E402
 
 # ── Labels (mantidas para o prompt de dispatch) ───────────────────────────
 LABEL_DEV     = "crewflow:dev"
@@ -268,7 +268,6 @@ def _dispatch(
 
 def _scan_result_to_issue(result: object) -> dict:
     """Converte um ScanResult para o formato mínimo que o prompt de dispatch precisa."""
-    from flow.scan.scanner import ScanResult
     r: ScanResult = result  # type: ignore[assignment]
     item = r.item
     # Extrai o número da issue key ("VGAT-123" → 123, "owner/repo#42" → 42)
@@ -295,7 +294,6 @@ def _dry_run_report(
     spec_invalid: list,
 ) -> None:
     """Imprime o relatório de dry-run no stdout sem executar nenhum efeito colateral."""
-    from flow.scan.scanner import ScanResult
 
     print("[DRY-RUN] ──────────────────────────────────────────")
     print(f"[DRY-RUN] {len(scan_results)} issue(s) processada(s) pelo scan")
@@ -331,7 +329,7 @@ def _dry_run_report(
         len(dispatch_devs) + len(dispatch_reviewers) + len(merge_prs)
         + len(needs_human) + len(rebranded) + len(blocked_bypass) + len(spec_invalid)
     )
-    skipped = len(scan_results) - total_actions
+    skipped = max(0, len(scan_results) - total_actions)
     if skipped > 0:
         print(f"[DRY-RUN] {skipped} issue(s) sem ação (SKIP)")
 
@@ -435,7 +433,6 @@ def run(ctx: object) -> None:
     # ── Separa candidatos de dispatch dos informativos ────────────────────
     # ── Passa todos os resultados pelo executor ────────────────────────────
     from flow.executor.executor import ActionKind, decide, resolve_template
-    from flow.scan.scanner import ScanResult
 
     # Categorias de resultado após o executor — tipadas para mypy
     spec_invalid: list[ScanResult] = []
