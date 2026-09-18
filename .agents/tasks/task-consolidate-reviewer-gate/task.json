@@ -1,7 +1,7 @@
 {
   "task_id": "task-consolidate-reviewer-gate",
   "task_description": "Issue #88 (Fase 2 / BO #3): consolidate code review into a single review gate that validates the whole pipeline (CI green) AND the PR comments (not just the diff), always posts the complete result to both the PR and the responsible issue (what was done + link + full info), and unlocks the approve/merge path (applies crewflow:reviewed enabling merge per BO #5) only when the pipeline is green and comments are resolved. Includes tests for CI red / pending comments / all green, plus README and steering updates.",
-  "status": "in_progress",
+  "status": "completed",
   "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
   "blocked_reason": null,
   "verification": {
@@ -9,6 +9,7 @@
     "tests": "pass",
     "test_quality": "pass",
     "docker_build": "skipped",
-    "summary": "python3.12 -m ruff check flow/ clean; mypy --ignore-missing-imports clean (47 files); test_domain_boundary.py passes (domain stays I/O-free, CI injected via pr_ci_green); full suite 522 passed, coverage 86.41% (>=75%). The single failing test (test_prompts_loader.py::TestRenderPromptFallback::test_template_corrompido_ilegivel_usa_fallback) is a pre-existing root-only environmental artifact — it chmods a file to 0o000 and expects a read failure, which root bypasses; confirmed it passes when run as the unprivileged 'nobody' user and that it also fails on the pre-change baseline. Test quality verified by reading diffs: executor tests exercise the new pr_ci_green branch (red->NOTIFY_HUMAN TL, green->MERGE_PR, None->legacy MERGE_PR) and would fail if reverted; deployment integration tests drive run() with mocked transport asserting merge_pull_request is NOT called on red CI and IS called on green, plus the complete result posted to the PR. No Dockerfile in project so docker build not applicable."
+    "summary": "python3.12 -m ruff check flow/ (and deployment/) clean; mypy --ignore-missing-imports clean (47 files); test_domain_boundary.py passes (domain stays I/O-free, CI status injected via pr_ci_green/pr_ci_status); full suite 530 passed, coverage 86.59% (>=75%). The single failing test (test_prompts_loader.py::TestRenderPromptFallback::test_template_corrompido_ilegivel_usa_fallback) is a pre-existing root-only environmental artifact — it chmods a file to 0o000 and expects a read failure which root bypasses; confirmed it passes as the unprivileged 'nobody' user and also fails on the pre-change baseline. Test quality verified by reading diffs: executor tests exercise the pr_ci_green/pr_ci_status branch (red->NOTIFY_HUMAN TL, pending->NOTIFY_HUMAN TL labeled 'pendente', green->MERGE_PR, None->legacy MERGE_PR) and would fail if reverted; deployment integration tests drive run() with mocked transport asserting merge_pull_request is NOT called on red/pending CI and IS called on green, plus the complete result upserted to both PR and issue. No Dockerfile in project so docker build not applicable.",
+    "semantic_review": "APPROVED. v1 approved with 3 non-blocking issues (pending-CI mislabeled as red, no live comment re-check, issue-side result appended not upserted); all three addressed in polish commit b7b7006 (tri-state pr_ci_status for pending/red wording while both still block; asymmetry justified inline; marker-based upsert_issue_review_result). v2 review verdict APPROVED with 0 open issues. Reviews at .agents/tasks/task-consolidate-reviewer-gate/2026-09-18-233336-review.md (v1) and 2026-09-18-234255-review.md (v2)."
   }
 }
