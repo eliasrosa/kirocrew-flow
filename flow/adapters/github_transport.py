@@ -90,10 +90,9 @@ def list_issues_by_label(owner_repo: str, label: str, limit: int = 50) -> list:
 
 def set_issue_labels(owner_repo: str, number: int, labels: list[str]) -> None:
     """Substitui todas as labels da issue via API do GitHub (PUT /issues/{n}/labels)."""
-    import subprocess as _sp
     # gh api --input lê JSON do stdin — única forma de mandar array sem serializar como string
     body = json.dumps({"labels": labels})
-    result = _sp.run(
+    result = subprocess.run(
         ["gh", "api", f"repos/{owner_repo}/issues/{number}/labels",
          "--method", "PUT", "--input", "-"],
         input=body,
@@ -137,8 +136,7 @@ def delete_issue_comment(owner_repo: str, comment_id: int) -> None:
 
     Silencioso se o comentário não existir (404 ignorado).
     """
-    import subprocess as _sp
-    result = _sp.run(
+    result = subprocess.run(
         ["gh", "api", f"repos/{owner_repo}/issues/comments/{comment_id}",
          "--method", "DELETE"],
         capture_output=True,
@@ -233,7 +231,6 @@ def delete_branch(owner_repo: str, branch: str) -> None:
 
     Silencioso se o branch não existir (404 é ignorado).
     """
-    import subprocess
     result = subprocess.run(
         ["gh", "api", f"repos/{owner_repo}/git/refs/heads/{branch}",
          "--method", "DELETE"],
