@@ -13,7 +13,9 @@ FLUXO (execute UMA vez, do início ao fim, e PARE):
    - `README.md`
    - `docs/` se existir
    - A própria issue: `gh issue view {{issue_number}} --repo {{repo}}`
-   Não pule esta etapa — as steerings têm convenções e gotchas críticos.
+   - Os comentários da issue: `gh issue view {{issue_number}} --repo {{repo}} --comments`
+   Não pule esta etapa — as steerings têm convenções e gotchas críticos, e os
+   comentários podem conter adendos e decisões que refinam o escopo.
 2. ESCOPO: se a issue exige decisão de design não-tomada ou é vaga, NÃO implemente — comente, marque `crewflow:blocked`, avise e ENCERRE.
 3. Marque `crewflow:dev` + `crewflow:running`. NÃO faça `git clone`. Use o clone em `{{dev_root}}/{{repo_short}}` como base e crie um WORKTREE ISOLADO.
    A branch base é a DEFAULT DO REPO — descubra, não presuma:

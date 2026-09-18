@@ -212,6 +212,24 @@ class TestRealTemplates:
         )
         assert "instrução extra aqui" in result
 
+    def test_dev_template_real_le_comentarios_da_issue(self) -> None:
+        """Passo 1 (CONTEXTO) deve instruir a leitura dos comentários da issue."""
+        result = render_prompt(
+            "dev",
+            repo="owner/myrepo",
+            repo_short="myrepo",
+            issue_number="42",
+            issue_title="Fix bug",
+            issue_url="https://github.com/owner/myrepo/issues/42",
+            session_title="myrepo #42: Fix bug",
+            dev_root="/home/dev",
+            worktree_path="/home/dev/.esteira-worktrees/myrepo-42",
+            notify_step="reporte o resultado, ",
+            vault_step="",
+            prompt_extra="",
+        )
+        assert "gh issue view 42 --repo owner/myrepo --comments" in result
+
     def test_reviewer_template_real_renderiza_sem_erro(self) -> None:
         result = render_prompt(
             "reviewer",
@@ -244,3 +262,18 @@ class TestRealTemplates:
             ref_issue="",
         )
         assert "review: myrepo PR #10 (issue #20)" in result
+
+    def test_reviewer_template_real_le_comentarios_issue_e_pr(self) -> None:
+        """Passos 1-2 devem instruir a leitura dos comentários da issue e do PR."""
+        result = render_prompt(
+            "reviewer",
+            repo="owner/myrepo",
+            repo_short="myrepo",
+            pr_number="5",
+            issue_number="42",
+            example_approved="",
+            example_changes="",
+            ref_issue="",
+        )
+        assert "gh issue view 42 --repo owner/myrepo --comments" in result
+        assert "gh pr view 5 --repo owner/myrepo --comments" in result

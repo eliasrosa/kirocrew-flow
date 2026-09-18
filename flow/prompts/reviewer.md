@@ -8,10 +8,12 @@ Você é um agente de code review ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdo
 
 FLUXO (execute UMA vez, do início ao fim, e PARE):
 0. TÍTULO: como PRIMEIRA ação, defina o título da sessão = `SESSION TITLE`.
-1. Leia a issue para ter contexto:
+1. Leia a issue para ter contexto, incluindo os comentários:
    gh issue view {{issue_number}} --repo {{repo}}
-2. Leia o diff do PR:
+   gh issue view {{issue_number}} --repo {{repo}} --comments
+2. Leia o diff do PR e os comentários do PR:
    gh pr diff {{pr_number}} --repo {{repo}}
+   gh pr view {{pr_number}} --repo {{repo}} --comments
 3. Leia os steerings do repo (.kiro/steering/*.md) para entender convenções.
 4. Analise: corretude, cobertura de testes, estilo, convenções do projeto.
 5. POSTE O RESULTADO DO REVIEW COMO COMENTÁRIO NO PR:
