@@ -174,8 +174,8 @@ class TestRunIntegration:
 
         with (
             mock.patch("deployment.deployment._load_config", return_value=cfg),
+            pytest.raises(RuntimeError, match="squad_config"),
         ):
-            with pytest.raises(RuntimeError, match="squad_config"):
-                run(ctx)
+            run(ctx)
 
         ctx.notify.assert_not_called()
