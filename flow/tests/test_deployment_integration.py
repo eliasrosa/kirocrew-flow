@@ -692,6 +692,41 @@ class TestReviewerPrompt:
         assert "crewflow:reviewed" in prompt
         assert "NUNCA mergeie" in prompt
 
+    def test_exemplar_do_pr_derivado_do_helper(self) -> None:
+        """Fonte única de verdade: o exemplar do comentário do PR no prompt é
+        PRODUZIDO por render_pr_review_comment (cada linha do helper aparece no
+        prompt, apenas indentada). Se o helper e o prompt divergirem, quebra.
+        """
+        from deployment.deployment import _reviewer_prompt
+        from flow.audit.state_comment import render_pr_review_comment
+
+        prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        exemplo_mudancas = render_pr_review_comment(
+            approved=False,
+            comments=["<mudança 1>", "<mudança 2>"],
+            issue_number=42,
+        )
+        for line in exemplo_mudancas.splitlines():
+            assert (f"     {line}" if line else line) in prompt
+
+        exemplo_aprovado = render_pr_review_comment(
+            approved=True, comments=[], issue_number=42
+        )
+        for line in exemplo_aprovado.splitlines():
+            assert (f"     {line}" if line else line) in prompt
+
+    def test_referencia_da_issue_derivada_do_helper(self) -> None:
+        """Fonte única de verdade: a referência curta na issue vem de
+        render_issue_pr_reference, evitando drift entre helper e prompt.
+        """
+        from deployment.deployment import _reviewer_prompt
+        from flow.audit.state_comment import render_issue_pr_reference
+
+        prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        assert render_issue_pr_reference(99, approved=True) in prompt
+
 
 class TestDispatchReviewerFunction:
     """_dispatch_reviewer faz POST /api/chat com o slot e prompt corretos."""

@@ -41,6 +41,10 @@ if _REPO_ROOT not in sys.path:
 
 from datetime import UTC  # noqa: E402
 
+from flow.audit.state_comment import (  # noqa: E402
+    render_issue_pr_reference,
+    render_pr_review_comment,
+)
 from flow.ports.issue_provider import provider_for  # noqa: E402
 from flow.scan.cache import open_cache  # noqa: E402
 from flow.scan.scanner import scan_candidates  # noqa: E402
@@ -700,8 +704,32 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
     6. Deixar uma referência curta na issue apontando pro PR + status
     7. Adicionar crewflow:reviewed se zero comentários
     8. ENCERRAR
+
+    O formato do comentário do PR e da referência na issue tem UMA definição:
+    os exemplares embutidos no prompt são produzidos pelos helpers puros
+    ``render_pr_review_comment`` e ``render_issue_pr_reference`` de
+    ``flow.audit.state_comment``. Assim o helper (exercitado por testes) e o
+    prompt não divergem silenciosamente.
     """
     short = repo.split("/")[-1]
+
+    # ── Fonte única de verdade para o formato do comentário ───────────────
+    # Os exemplares abaixo são PRODUZIDOS pelos mesmos helpers puros de
+    # flow/audit/state_comment.py que os testes exercitam. Assim o formato
+    # tem UMA definição: se o helper mudar, o prompt muda junto (sem drift).
+    exemplo_aprovado = render_pr_review_comment(
+        approved=True, comments=[], issue_number=issue_number
+    )
+    exemplo_mudancas = render_pr_review_comment(
+        approved=False,
+        comments=["<mudança 1>", "<mudança 2>"],
+        issue_number=issue_number,
+    )
+    ref_issue = render_issue_pr_reference(pr_number, approved=True)
+
+    def _indent(text: str, prefix: str = "     ") -> str:
+        return "\n".join(prefix + line if line else line for line in text.splitlines())
+
     return (
         "------------ AGENT HEADER ----------------\n"
         f"REPO: {repo}\n"
@@ -720,17 +748,11 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
         "4. Analise: corretude, cobertura de testes, estilo, convenções do projeto.\n"
         "5. POSTE O RESULTADO DO REVIEW COMO COMENTÁRIO NO PR:\n"
         f"   gh pr comment {pr_number} --repo {repo} --body \"<corpo do review>\"\n"
-        "   Use EXATAMENTE este formato no corpo (KiroCrew Review):\n"
-        "     ## 🤖 KiroCrew Review\n"
-        "\n"
-        "     **Resultado:** ✅ Aprovado        (ou ⚠️ Pedidos de mudança)\n"
-        "\n"
-        "     ### Pedidos de mudança            (SÓ quando houver comentários)\n"
-        "     - <mudança 1>\n"
-        "     - <mudança 2>\n"
-        "\n"
-        f"     *Reviewer automático — issue #{issue_number}*\n"
-        "   Se APROVADO sem comentários, omita a seção `### Pedidos de mudança`.\n"
+        "   Use EXATAMENTE este formato no corpo (KiroCrew Review).\n"
+        "   Se APROVADO sem comentários (omita a seção `### Pedidos de mudança`):\n"
+        f"{_indent(exemplo_aprovado)}\n"
+        "   Se houver pedidos de mudança:\n"
+        f"{_indent(exemplo_mudancas)}\n"
         "6. Registre o resultado no state_comment DA ISSUE com ReviewerResult:\n"
         "   - Se APROVADO sem comentários: campo `approved: true`, `comments: []`\n"
         "   - Se tem pedidos de mudança: `approved: false`, `comments: [\"<mudança 1>\", ...]`\n"
@@ -738,7 +760,7 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
         "   O ReviewerResult deve incluir o SHA atual do HEAD do PR.\n"
         "   IMPORTANTE: o ReviewerResult PERMANECE na issue — é o que o scan lê pra decidir MERGE_PR.\n"
         f"7. Deixe uma referência CURTA na issue #{issue_number} apontando pro PR e o status:\n"
-        f"   ex.: `Review postado em PR #{pr_number} — status: aprovado` (ou `pedidos de mudança`).\n"
+        f"   ex.: `{ref_issue}` (troque para `pedidos de mudança` se houver comentários).\n"
         "   NÃO duplique o detalhe dos pedidos de mudança na issue — só o link + status.\n"
         f"8. Se zero comentários: adicione a label `crewflow:reviewed` à issue #{issue_number}.\n"
         "9. Se tem comentários: NÃO adicione `crewflow:reviewed` — o TL decide.\n"
