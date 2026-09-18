@@ -472,6 +472,107 @@ class TestMiniYamlFallback:
 
 
 # ---------------------------------------------------------------------------
+# Regressões de indentação no fallback _mini_yaml
+# ---------------------------------------------------------------------------
+
+# PyYAML está instalado no ambiente de dev, então comparamos o fallback
+# DIRETAMENTE contra `yaml.safe_load` — sem precisar forçar ImportError, já que
+# `_mini_yaml` é chamado explicitamente.
+class TestMiniYamlIndentationRegressions:
+    """Garante paridade com PyYAML em formas de indentação não-triviais.
+
+    Estes casos FALHAVAM no parser anterior:
+      1. listas na MESMA indentação da chave (forma flush-left) viravam `[]`;
+      2. chaves de continuação de item de lista assumiam passo fixo de 2 espaços.
+    """
+
+    def _mini(self, text: str) -> object:
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            f.write(text)
+            tmp = f.name
+        try:
+            return _mini_yaml(Path(tmp))
+        finally:
+            Path(tmp).unlink()
+
+    def test_lista_flush_left_nao_vira_vazia(self) -> None:
+        # `repos:` seguido de itens na coluna 0 (mesma indentação da chave).
+        # O parser antigo devolvia {'repos': []} (perda silenciosa de dados).
+        import yaml
+
+        text = "repos:\n- owner/repo-a\n- owner/repo-b\n"
+        assert self._mini(text) == yaml.safe_load(text)
+        assert self._mini(text) == {"repos": ["owner/repo-a", "owner/repo-b"]}
+
+    def test_routing_flush_left_igual_ao_pyyaml(self) -> None:
+        # `routing:` com itens flush-left: as regras SUMIAM no parser antigo,
+        # fazendo tudo cair no default_workflow.
+        import yaml
+
+        text = (
+            "routing:\n"
+            "- match:\n"
+            "    labels:\n"
+            "    - crewflow:bug\n"
+            "  workflow: bug-flow\n"
+            "- default: feature-flow\n"
+        )
+        assert self._mini(text) == yaml.safe_load(text)
+
+    def test_continuacao_com_passo_de_4_espacos(self) -> None:
+        # Chave de continuação `workflow` a 4 espaços do `-` (não 2).
+        # O parser antigo usava child_indent = indent + 2 fixo.
+        import yaml
+
+        text = (
+            "routing:\n"
+            "  - match:\n"
+            "        labels:\n"
+            "          - crewflow:bug\n"
+            "    workflow: bug-flow\n"
+        )
+        assert self._mini(text) == yaml.safe_load(text)
+
+    def test_continuacao_com_passo_de_1_espaco(self) -> None:
+        import yaml
+
+        text = (
+            "routing:\n"
+            "  - match:\n"
+            "     labels:\n"
+            "      - crewflow:bug\n"
+            "    workflow: bug-flow\n"
+        )
+        assert self._mini(text) == yaml.safe_load(text)
+
+    def test_item_de_lista_solto_onde_mapa_esperado_lanca(self) -> None:
+        # Input ambíguo: um `- ` onde uma chave de mapa era esperada.
+        # Deve falhar ALTO em vez de descartar dados silenciosamente.
+        text = "id: sq\n- solto\n"
+        with pytest.raises(SquadConfigError, match="inesperado"):
+            self._mini(text)
+
+    def test_equivalencia_com_pyyaml_em_squads_example(self) -> None:
+        # Garante que a saída do fallback é estruturalmente idêntica à do
+        # PyYAML para o arquivo de exemplo real de squad.
+        import yaml
+
+        example = Path(__file__).parent.parent.parent / "squads" / "example.yaml"
+        with example.open() as f:
+            expected = yaml.safe_load(f)
+        assert _mini_yaml(example) == expected
+
+    def test_equivalencia_com_pyyaml_em_config_example(self) -> None:
+        # Idem para o config de cron de exemplo (deployment).
+        import yaml
+
+        cfg = Path(__file__).parent.parent.parent / "config.example.yaml"
+        with cfg.open() as f:
+            expected = yaml.safe_load(f)
+        assert _mini_yaml(cfg) == expected
+
+
+# ---------------------------------------------------------------------------
 # Workflow templates
 # ---------------------------------------------------------------------------
 

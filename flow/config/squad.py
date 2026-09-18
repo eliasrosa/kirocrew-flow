@@ -197,7 +197,21 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 
 def _coerce_scalar(val: str) -> Any:
-    """Converte um escalar textual YAML no tipo Python correspondente."""
+    """Converte um escalar textual YAML no tipo Python correspondente.
+
+    Conjunto de escalares suportado pelo fallback (subconjunto do YAML,
+    suficiente para o schema documentado em ``squads/example.yaml`` e
+    ``config.example.yaml``):
+
+      - ``true`` / ``false`` (case-insensitive) → ``bool``;
+      - inteiros positivos sem sinal (``str.isdigit()``) → ``int``;
+      - qualquer outra coisa → ``str`` (mantida como texto).
+
+    NÃO cobre floats, inteiros negativos, ``null`` nem escalares numéricos
+    entre aspas — para esses casos, instale PyYAML (`pip install -e '.[yaml]'`).
+    Nenhum campo do schema atual usa esses tipos, então a divergência é inerte;
+    ela existe apenas para manter o fallback pequeno e previsível.
+    """
     if val.lower() in ("true", "false"):
         return val.lower() == "true"
     if val.isdigit():
@@ -281,20 +295,29 @@ def _parse_block(lines: list[tuple[int, str]], start: int) -> tuple[dict[str, An
         if indent < block_indent:
             break
         if content.startswith("- "):
-            # Item de lista onde esperávamos um mapa — ignora (mal-formado).
-            i += 1
-            continue
+            # Item de lista onde esperávamos uma chave de mapa: input ambíguo
+            # (indentação inconsistente). Falha alto em vez de descartar dados.
+            raise SquadConfigError(
+                f"YAML inválido (fallback): item de lista inesperado onde um "
+                f"mapa era esperado: {content!r}"
+            )
         key, _, rest = content.partition(":")
         key = key.strip().strip("\"'")
         rest = rest.strip()
         if rest == "":
-            # Valor em bloco: lista ou mapa aninhado na(s) próxima(s) linha(s).
-            if i + 1 < len(lines) and lines[i + 1][0] > block_indent:
-                value: Any
-                if lines[i + 1][1].startswith("- "):
-                    value, i = _parse_list(lines, i + 1, lines[i + 1][0])
-                else:
-                    value, i = _parse_block(lines, i + 1)
+            # Valor em bloco na(s) próxima(s) linha(s). Em YAML, itens de lista
+            # podem estar MAIS indentados que a chave OU na MESMA indentação
+            # (forma flush-left, ex.: `repos:` seguido de `- a` na coluna 0).
+            value: Any
+            if (
+                i + 1 < len(lines)
+                and lines[i + 1][1].startswith("- ")
+                and lines[i + 1][0] >= block_indent
+            ):
+                value, i = _parse_list(lines, i + 1, lines[i + 1][0])
+                result[key] = value
+            elif i + 1 < len(lines) and lines[i + 1][0] > block_indent:
+                value, i = _parse_block(lines, i + 1)
                 result[key] = value
             else:
                 result[key] = []
@@ -334,7 +357,6 @@ def _parse_list(
             entry: dict[str, Any] = {}
             key = key.strip().strip("\"'")
             rest = rest.strip()
-            child_indent = indent + 2
             if rest == "":
                 # Chave com bloco aninhado (mapa ou lista) nas próximas linhas.
                 if i + 1 < len(lines) and lines[i + 1][0] > indent:
@@ -348,8 +370,12 @@ def _parse_list(
             else:
                 entry[key] = _parse_inline_value(rest)
                 i += 1
-            # Chaves adicionais do mesmo item de lista (indentadas além do `-`).
-            while i < len(lines) and lines[i][0] >= child_indent and \
+            # Chaves adicionais do mesmo item de lista. A indentação de
+            # continuação NÃO é fixada em `indent + 2`: qualquer chave
+            # estritamente mais indentada que o marcador `-` pertence ao
+            # mesmo item (regra de block-mapping do YAML). A indentação real
+            # é derivada da primeira linha de continuação encontrada.
+            while i < len(lines) and lines[i][0] > indent and \
                     not lines[i][1].startswith("- "):
                 extra, _, xrest = lines[i][1].partition(":")
                 extra = extra.strip().strip("\"'")
