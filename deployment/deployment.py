@@ -315,7 +315,7 @@ def run(ctx: object) -> None:
     spec_invalid: list[ScanResult] = []
     dispatch_devs: list[tuple[str, dict, object]] = []   # (repo, issue, decision)
     dispatch_reviewers: list[tuple[str, dict]] = []      # (repo, issue)
-    needs_human: list[tuple[ScanResult, object]] = []    # (result, decision)
+    needs_human: list[tuple[ScanResult, object, str | None]] = []  # (result, decision, sc)
     blocked_bypass: list[ScanResult] = []                # result com bypass sem justif
     rebranded: list[tuple[ScanResult, object]] = []      # (result, decision)
 
@@ -520,16 +520,15 @@ def _notify_human_actions(ctx: object, items: list, chat_id: str) -> None:
             sc_obj.status = "awaiting-tl-approval"
             import contextlib
             with contextlib.suppress(Exception):
-                from flow.adapters.github_client import GitHubClient
-                client = GitHubClient()
+                from flow.adapters.github_client import upsert_state_comment
                 # Extrai repo e número da issue da key
                 key = r.item.key  # https://github.com/owner/repo/issues/N
                 parts = key.rstrip("/").split("/")
                 if len(parts) >= 5:
                     repo_path = f"{parts[-4]}/{parts[-3]}"
-                    issue_num = int(parts[-1])
+                    issue_num_str = parts[-1]
                     updated_body = _render_sc(sc_obj)
-                    client.upsert_state_comment(repo_path, issue_num, updated_body)
+                    upsert_state_comment(repo_path, issue_num_str, updated_body)
 
     if tl_to_notify:
         from datetime import datetime
