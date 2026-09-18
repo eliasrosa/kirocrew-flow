@@ -695,9 +695,11 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
     1. Ler a issue para contexto
     2. Ler o diff do PR
     3. Ler os steerings do repo
-    4. Analisar e postar o resultado via ReviewerResult no state_comment
-    5. Adicionar crewflow:reviewed se zero comentários
-    6. ENCERRAR
+    4. Analisar e postar o resultado do review COMO COMENTÁRIO NO PR
+    5. Registrar o ReviewerResult no state_comment DA ISSUE (o scan lê isso)
+    6. Deixar uma referência curta na issue apontando pro PR + status
+    7. Adicionar crewflow:reviewed se zero comentários
+    8. ENCERRAR
     """
     short = repo.split("/")[-1]
     return (
@@ -716,14 +718,31 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
         f"   gh pr diff {pr_number} --repo {repo}\n"
         f"3. Leia os steerings do repo (.kiro/steering/*.md) para entender convenções.\n"
         "4. Analise: corretude, cobertura de testes, estilo, convenções do projeto.\n"
-        "5. Poste o resultado no state_comment da issue com ReviewerResult:\n"
+        "5. POSTE O RESULTADO DO REVIEW COMO COMENTÁRIO NO PR:\n"
+        f"   gh pr comment {pr_number} --repo {repo} --body \"<corpo do review>\"\n"
+        "   Use EXATAMENTE este formato no corpo (KiroCrew Review):\n"
+        "     ## 🤖 KiroCrew Review\n"
+        "\n"
+        "     **Resultado:** ✅ Aprovado        (ou ⚠️ Pedidos de mudança)\n"
+        "\n"
+        "     ### Pedidos de mudança            (SÓ quando houver comentários)\n"
+        "     - <mudança 1>\n"
+        "     - <mudança 2>\n"
+        "\n"
+        f"     *Reviewer automático — issue #{issue_number}*\n"
+        "   Se APROVADO sem comentários, omita a seção `### Pedidos de mudança`.\n"
+        "6. Registre o resultado no state_comment DA ISSUE com ReviewerResult:\n"
         "   - Se APROVADO sem comentários: campo `approved: true`, `comments: []`\n"
         "   - Se tem pedidos de mudança: `approved: false`, `comments: [\"<mudança 1>\", ...]`\n"
-        "   Use `upsert_state_comment` para atualizar o bloco <!-- KIRO-FLOW-STATE -->.\n"
+        "   Use `upsert_state_comment` para atualizar o bloco <!-- KIRO-FLOW-STATE --> NA ISSUE.\n"
         "   O ReviewerResult deve incluir o SHA atual do HEAD do PR.\n"
-        f"6. Se zero comentários: adicione a label `crewflow:reviewed` à issue #{issue_number}.\n"
-        "7. Se tem comentários: NÃO adicione `crewflow:reviewed` — o TL decide.\n"
-        "8. ENCERRE.\n\n"
+        "   IMPORTANTE: o ReviewerResult PERMANECE na issue — é o que o scan lê pra decidir MERGE_PR.\n"
+        f"7. Deixe uma referência CURTA na issue #{issue_number} apontando pro PR e o status:\n"
+        f"   ex.: `Review postado em PR #{pr_number} — status: aprovado` (ou `pedidos de mudança`).\n"
+        "   NÃO duplique o detalhe dos pedidos de mudança na issue — só o link + status.\n"
+        f"8. Se zero comentários: adicione a label `crewflow:reviewed` à issue #{issue_number}.\n"
+        "9. Se tem comentários: NÃO adicione `crewflow:reviewed` — o TL decide.\n"
+        "10. ENCERRE.\n\n"
         "REGRAS CRÍTICAS:\n"
         "- UMA passada. Terminou, acabou. NÃO entre em loop.\n"
         "- NUNCA mergeie. NUNCA faça deploy.\n"

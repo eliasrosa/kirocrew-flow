@@ -639,6 +639,59 @@ class TestReviewerPrompt:
 
         assert "SESSION TITLE: review: kirocrew-flow PR #5 (issue #70)" in prompt
 
+    def test_instrui_postar_no_pr_via_gh_pr_comment(self) -> None:
+        """O prompt manda postar o resultado NO PR via gh pr comment <N>."""
+        from deployment.deployment import _reviewer_prompt
+
+        prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        assert "gh pr comment 99 --repo owner/myrepo" in prompt
+
+    def test_contem_formato_kirocrew_review(self) -> None:
+        """O prompt referencia o formato KiroCrew Review do comentário do PR."""
+        from deployment.deployment import _reviewer_prompt
+
+        prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        assert "## 🤖 KiroCrew Review" in prompt
+        assert "**Resultado:**" in prompt
+        assert "✅ Aprovado" in prompt
+        assert "⚠️ Pedidos de mudança" in prompt
+        assert "*Reviewer automático — issue #42*" in prompt
+
+    def test_contem_referencia_curta_na_issue(self) -> None:
+        """O prompt instrui deixar referência curta na issue apontando pro PR."""
+        from deployment.deployment import _reviewer_prompt
+
+        prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        assert "Review postado em PR #99" in prompt
+
+    def test_preserva_state_comment_na_issue(self) -> None:
+        """O prompt continua instruindo o upsert do ReviewerResult NA ISSUE."""
+        from deployment.deployment import _reviewer_prompt
+
+        prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        assert "upsert_state_comment" in prompt
+        assert "<!-- KIRO-FLOW-STATE -->" in prompt
+        assert "ReviewerResult" in prompt
+
+    def test_regressao_todos_substrings_antigos(self) -> None:
+        """Guard de regressão: todos os substrings previamente asseridos seguem presentes."""
+        from deployment.deployment import _reviewer_prompt
+
+        prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        assert "REPO: owner/myrepo" in prompt
+        assert "PR: #99" in prompt
+        assert "ISSUE: #42" in prompt
+        assert "SESSION TITLE: review: myrepo PR #99 (issue #42)" in prompt
+        assert "gh issue view 42 --repo owner/myrepo" in prompt
+        assert "gh pr diff 99 --repo owner/myrepo" in prompt
+        assert "crewflow:reviewed" in prompt
+        assert "NUNCA mergeie" in prompt
+
 
 class TestDispatchReviewerFunction:
     """_dispatch_reviewer faz POST /api/chat com o slot e prompt corretos."""
