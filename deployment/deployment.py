@@ -324,7 +324,7 @@ def run(ctx: object) -> None:
 
     # ── Separa candidatos de dispatch dos informativos ────────────────────
     # ── Passa todos os resultados pelo executor ────────────────────────────
-    from flow.executor.executor import ActionKind, decide
+    from flow.executor.executor import ActionKind, decide, resolve_template
 
     # Categorias de resultado após o executor
     spec_invalid: list = []
@@ -359,6 +359,17 @@ def run(ctx: object) -> None:
                 )
 
         decision = decide(result, state_comment=state_comment, squad=squad)
+
+        # Loga o template resolvido pelo executor e a ação decidida, para
+        # cada issue processada — facilita debugar por que uma issue foi para
+        # REBRAND (GATE 0) em vez de DISPATCH_DEV.
+        template = resolve_template(result, squad)
+        logger.info(
+            "deployment: issue=%s template=%s action=%s",
+            result.item.key,
+            template,
+            decision.action,
+        )
 
         if decision.action is ActionKind.SKIP:
             continue
