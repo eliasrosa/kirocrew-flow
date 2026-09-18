@@ -324,3 +324,78 @@ class TestAlwaysIncludeStates:
 
         assert len(results) == 1
         assert results[0].dispatch_candidate is False
+
+
+# ---------------------------------------------------------------------------
+# states — escopo de estados por estágio (FEAT-002 / BO #1)
+# O cron por estágio varre APENAS os estados do seu estágio (zero-token).
+# states=None (default) preserva o comportamento monolítico (varre tudo).
+# ---------------------------------------------------------------------------
+
+class TestStatesScoping:
+    def _config(self, states: frozenset | None) -> SquadScanConfig:
+        return SquadScanConfig(
+            squad_id="test",
+            issue_provider="github",
+            projects=("owner/repo",),
+            repos=frozenset({"api-gateway2"}),
+            states=states,
+        )
+
+    def test_states_none_varre_todos_os_estados(self, conn: sqlite3.Connection) -> None:
+        """states=None (padrão) → chama list_by_state para TODOS os States."""
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = []
+
+        scan_candidates(self._config(None), provider, conn)
+
+        called_states = {c.args[1] for c in provider.list_by_state.call_args_list}
+        assert called_states == {s.value for s in State}
+
+    def test_states_escopa_scan_para_um_estado(self, conn: sqlite3.Connection) -> None:
+        """states={TODO} → list_by_state só é chamado para crewflow:todo."""
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = []
+
+        scan_candidates(self._config(frozenset({State.TODO})), provider, conn)
+
+        called_states = {c.args[1] for c in provider.list_by_state.call_args_list}
+        assert called_states == {"crewflow:todo"}
+
+    def test_states_review_nao_varre_todo(self, conn: sqlite3.Connection) -> None:
+        """states={REVIEW} → não varre crewflow:todo (zero-token do estágio reviewer)."""
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = []
+
+        scan_candidates(self._config(frozenset({State.REVIEW})), provider, conn)
+
+        called_states = {c.args[1] for c in provider.list_by_state.call_args_list}
+        assert called_states == {"crewflow:review"}
+        assert "crewflow:todo" not in called_states
+
+    def test_states_escopado_ainda_retorna_candidatos(self, conn: sqlite3.Connection) -> None:
+        """Escopar por estado não quebra o resultado — a issue do estado é retornada."""
+        item = _item("VGAT-1", labels=["crewflow:todo", "crewflow:feature"])
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = lambda p, s: [item] if s == "crewflow:todo" else []
+
+        results = scan_candidates(self._config(frozenset({State.TODO})), provider, conn)
+        candidates = [r for r in results if r.dispatch_candidate]
+
+        assert len(candidates) == 1
+        assert candidates[0].item.key == "VGAT-1"
+
+    def test_states_scoping_reduz_numero_de_chamadas(self, conn: sqlite3.Connection) -> None:
+        """Escopar reduz o número de chamadas de API (menos tokens/latência)."""
+        provider_all = mock.MagicMock()
+        provider_all.list_by_state.return_value = []
+        scan_candidates(self._config(None), provider_all, conn)
+        n_all = provider_all.list_by_state.call_count
+
+        provider_scoped = mock.MagicMock()
+        provider_scoped.list_by_state.return_value = []
+        scan_candidates(self._config(frozenset({State.TODO})), provider_scoped, conn)
+        n_scoped = provider_scoped.list_by_state.call_count
+
+        assert n_scoped == 1
+        assert n_scoped < n_all

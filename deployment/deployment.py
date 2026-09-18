@@ -55,6 +55,71 @@ LABEL_DEV     = "crewflow:dev"
 LABEL_REVIEW  = "crewflow:review"
 LABEL_RUNNING = "crewflow:running"
 LABEL_BLOCKED = "crewflow:blocked"
+LABEL_CONFLITO = "crewflow:conflito"
+
+# ── Cron por estágio (FEAT-002 / BO #1) ────────────────────────────────────
+# Cada estágio do fluxo vira uma cron de script independente (dev / reviewer /
+# merge / conflito), com seu próprio modelo, log e intervalo. Isto permite:
+#   1. Observabilidade — cada cron tem log isolado.
+#   2. Modelo por ação — cada POST /api/chat com o modelo certo pro estágio.
+#   3. Blast radius menor — se o merge quebra, dev/reviewer seguem.
+#   4. Interval por estágio — reviewer varre mais rápido que dev.
+#
+# O mapeamento canônico estágio → (estados varridos, ActionKinds executados)
+# tem como FONTE DA VERDADE flow/domain/state.py e flow/executor/executor.py:
+#
+#   dev      → State.TODO           → DISPATCH_DEV, DISPATCH_REWORK
+#              (o cron dev é o dono natural de spec_invalid/blocked_bypass/
+#               rebrand/notify_human, que surgem do scan de todo/spec)
+#   reviewer → State.REVIEW         → DISPATCH_REVIEWER
+#   merge    → State.REVIEW+reviewed→ MERGE_PR
+#   conflito → label crewflow:conflito → roteia apenas (resolução é BO #4)
+#
+# IMPORTANTE: crewflow:conflito NÃO é um State/Modifier hoje. O cron conflito
+# apenas filtra/roteia itens com esse label — a RESOLUÇÃO fica para BO #4.
+#
+# O ``states`` de cada estágio escopa o scan zero-token (o cron dev só varre
+# TODO, o reviewer/merge só REVIEW, etc.). O conflito varre REVIEW (onde os PRs
+# vivem) e filtra pelo label. Quando ``states`` é None (monolítico), varre tudo.
+
+# Nomes canônicos dos estágios (usados na config `stages:` e no install-cron.sh)
+STAGE_DEV = "dev"
+STAGE_REVIEWER = "reviewer"
+STAGE_MERGE = "merge"
+STAGE_CONFLITO = "conflito"
+STAGE_NAMES = (STAGE_DEV, STAGE_REVIEWER, STAGE_MERGE, STAGE_CONFLITO)
+
+
+def _stage_states(stage: str) -> frozenset | None:
+    """Retorna os States que o scan de um estágio deve varrer (zero-token).
+
+    None (não deveria ocorrer para estágios conhecidos) = varre todos.
+    """
+    from flow.domain.state import State
+
+    if stage == STAGE_DEV:
+        return frozenset({State.TODO})
+    if stage in (STAGE_REVIEWER, STAGE_MERGE, STAGE_CONFLITO):
+        # reviewer/merge/conflito operam sobre PRs em review
+        return frozenset({State.REVIEW})
+    return None
+
+
+# Categorias de ação que cada estágio tem permissão de EXECUTAR. O scan e o
+# executor rodam igual em todos; o estágio só executa as categorias que lhe
+# pertencem — as demais são ignoradas (roteamento por estágio).
+_STAGE_CATEGORIES: dict[str, frozenset[str]] = {
+    # dev é o dono do dispatch de implementação + re-trabalho, e também das
+    # ações "informativas" que nascem do scan de todo/spec (spec_invalid,
+    # blocked_bypass, rebrand, notify_human).
+    STAGE_DEV: frozenset({
+        "dispatch_devs", "dispatch_reworks", "spec_invalid",
+        "blocked_bypass", "rebranded", "needs_human",
+    }),
+    STAGE_REVIEWER: frozenset({"dispatch_reviewers"}),
+    STAGE_MERGE: frozenset({"merge_prs"}),
+    STAGE_CONFLITO: frozenset({"conflito"}),
+}
 
 # ── Carregamento de config ────────────────────────────────────────────────
 _CONFIG_CANDIDATES = [
@@ -390,12 +455,41 @@ def _pr_exists(repo: str, issue_number: int) -> bool:
         return False
 
 
+def _chat_body(
+    message: str,
+    agent: str,
+    slot: str,
+    model: str | None = None,
+) -> bytes:
+    """Monta o corpo JSON do POST /api/chat.
+
+    Quando ``model`` é None (nenhum modelo por estágio configurado), o corpo é
+    EXATAMENTE o de sempre — {message, agent, slot, memory_mode} — para não
+    afetar testes/usuários existentes. Quando configurado, adiciona a chave
+    ``model`` (nome do modelo por estágio, ex.: forte no dev, leve no reviewer).
+
+    A chave JSON é ``model`` — o contrato /api/chat do Kiro Crew não está
+    disponível no sandbox para confirmar outro nome; documentado em
+    config.example.yaml.
+    """
+    payload: dict = {
+        "message": message,
+        "agent": agent,
+        "slot": slot,
+        "memory_mode": "temporary",
+    }
+    if model:
+        payload["model"] = model
+    return json.dumps(payload).encode()
+
+
 def _dispatch(
     ctx: object,
     repo: str,
     issue: dict,
     cfg: dict,
     prompt_extra: str = "",
+    model: str | None = None,
 ) -> None:
     """Fire-and-forget POST /api/chat (loopback interno)."""
     import urllib.request as _u
@@ -408,12 +502,7 @@ def _dispatch(
             repo, issue["number"], exc,
         )
         return
-    body = json.dumps({
-        "message": message,
-        "agent": cfg.get("agent") or "kirocrew",
-        "slot": slot,
-        "memory_mode": "temporary",
-    }).encode()
+    body = _chat_body(message, cfg.get("agent") or "kirocrew", slot, model)
     req = _u.Request(
         f"http://localhost:{ctx._port}/api/chat",  # type: ignore[attr-defined]
         data=body,
@@ -461,8 +550,10 @@ def _dry_run_report(
     rebranded: list,
     merge_prs: list,
     spec_invalid: list,
+    conflito: list | None = None,
 ) -> None:
     """Imprime o relatório de dry-run no stdout sem executar nenhum efeito colateral."""
+    conflito = conflito or []
 
     print("[DRY-RUN] ──────────────────────────────────────────")
     print(f"[DRY-RUN] {len(scan_results)} issue(s) processada(s) pelo scan")
@@ -497,9 +588,14 @@ def _dry_run_report(
         r = result  # type: ignore[assignment]
         print(f"[DRY-RUN] {r.item.key} → SPEC_INVALID (sem repo no título) — {r.item.title}")
 
+    for result in conflito:
+        r = result  # type: ignore[assignment]
+        print(f"[DRY-RUN] {r.item.key} → CONFLITO (crewflow:conflito — resolução é BO #4) — {r.item.title}")
+
     total_actions = (
         len(dispatch_devs) + len(dispatch_reviewers) + len(dispatch_reworks) + len(merge_prs)
         + len(needs_human) + len(rebranded) + len(blocked_bypass) + len(spec_invalid)
+        + len(conflito)
     )
     skipped = max(0, len(scan_results) - total_actions)
     if skipped > 0:
@@ -546,7 +642,37 @@ def _log_cycle_summary(
 
 
 def run(ctx: object) -> None:
+    """Entrypoint monolítico (retrocompatível).
+
+    Executa TODOS os estágios em um único scan/ciclo — comportamento
+    byte-for-byte idêntico ao histórico. É o entrypoint padrão do cron
+    ``crewflow-scan`` quando a config NÃO define um mapeamento ``stages:``.
+    """
+    _run_stages(ctx, stage=None)
+
+
+def _run_stages(ctx: object, stage: str | None = None) -> None:
+    """Corpo compartilhado do scan → decide → executa.
+
+    ``stage=None`` → monolítico: varre todos os estados e executa TODAS as
+    categorias de ação (comportamento retrocompatível de ``run()``).
+
+    ``stage`` em ``STAGE_NAMES`` → cron por estágio: escopa o scan aos estados
+    do estágio (zero-token preservado) e executa APENAS as categorias de ação
+    daquele estágio (roteamento isolado). O modelo e o log do estágio vêm da
+    config (``stages.<stage>.model`` / ``stages.<stage>.log``).
+    """
     cfg = _load_config()
+    # Categorias de ação que este ciclo tem permissão de executar.
+    # None (monolítico) = todas.
+    allowed: frozenset[str] | None = (
+        None if stage is None else _STAGE_CATEGORIES.get(stage, frozenset())
+    )
+    # Estados a varrer (zero-token por estágio). None = todos.
+    scan_states = None if stage is None else _stage_states(stage)
+    # Modelo por estágio, threaded no body do POST /api/chat.
+    stage_model = _stage_model(cfg, stage) if stage is not None else None
+
     repos: list[str] = cfg.get("repos") or []
     auto = bool(cfg.get("auto_dispatch", False))
     # max_concurrent_tasks é o nome canônico (Fase 2); max_concurrent mantido para compat.
@@ -618,6 +744,7 @@ def run(ctx: object) -> None:
             issue_provider=squad.issue_provider,
             projects=tuple(squad.projects),
             repos=squad.repos,
+            states=scan_states,
         )
     else:
         from flow.scan.scanner import SquadScanConfig
@@ -626,6 +753,7 @@ def run(ctx: object) -> None:
             issue_provider=issue_provider_name,
             projects=tuple(repos),
             repos=frozenset(repos),
+            states=scan_states,
         )
 
     conn: sqlite3.Connection = open_cache(scan_cfg.squad_id)
@@ -653,8 +781,18 @@ def run(ctx: object) -> None:
     blocked_bypass: list[ScanResult] = []                # result com bypass sem justif
     rebranded: list[tuple[ScanResult, object]] = []      # (result, decision)
     merge_prs: list[tuple[str, dict, str | None]] = []   # (repo, issue, state_comment) — merge squash automático
+    # Estágio conflito (BO #1): apenas ROTEIA itens com o label crewflow:conflito.
+    # A RESOLUÇÃO do conflito é BO #4 (fora de escopo) — aqui só coletamos e
+    # notificamos. Não é uma ActionKind do executor; detectamos pelo label.
+    conflito: list[ScanResult] = []                      # PRs com crewflow:conflito
 
     for result in scan_results:
+        # Estágio conflito: item carrega o label crewflow:conflito → roteia.
+        # Independente da ActionKind do executor (o label é um sinal externo).
+        if LABEL_CONFLITO in result.item.labels:
+            conflito.append(result)
+            continue
+
         # Flags do scan que não precisam do executor
         if result.spec_valid is False:
             spec_invalid.append(result)
@@ -756,9 +894,34 @@ def run(ctx: object) -> None:
         spec_invalid=len(spec_invalid),
     )
 
+    # ── Roteamento por estágio ─────────────────────────────────────────────
+    # Zera as categorias que NÃO pertencem ao estágio atual (quando escopado).
+    # No modo monolítico (allowed=None), todas as categorias são mantidas.
+    def _permitido(cat: str) -> bool:
+        return allowed is None or cat in allowed
+
+    if not _permitido("spec_invalid"):
+        spec_invalid = []
+    if not _permitido("dispatch_devs"):
+        dispatch_devs = []
+    if not _permitido("dispatch_reviewers"):
+        dispatch_reviewers = []
+    if not _permitido("dispatch_reworks"):
+        dispatch_reworks = []
+    if not _permitido("needs_human"):
+        needs_human = []
+    if not _permitido("blocked_bypass"):
+        blocked_bypass = []
+    if not _permitido("rebranded"):
+        rebranded = []
+    if not _permitido("merge_prs"):
+        merge_prs = []
+    if not _permitido("conflito"):
+        conflito = []
+
     # Sem nada a fazer?
     if not any([spec_invalid, dispatch_devs, dispatch_reviewers, dispatch_reworks,
-                needs_human, blocked_bypass, rebranded, merge_prs]):
+                needs_human, blocked_bypass, rebranded, merge_prs, conflito]):
         return
 
     # ── Modo dry-run: imprime relatório e encerra sem executar ────────────
@@ -773,6 +936,7 @@ def run(ctx: object) -> None:
             rebranded=rebranded,
             merge_prs=merge_prs,
             spec_invalid=spec_invalid,
+            conflito=conflito,
         )
         return
 
@@ -844,7 +1008,7 @@ def run(ctx: object) -> None:
         _clean_stale_worktree(dev_root, repo, issue["number"])
         try:
             prompt_extra = squad.dispatch_prompt_extra if squad else ""
-            _dispatch(ctx, repo, issue, cfg, prompt_extra=prompt_extra)
+            _dispatch(ctx, repo, issue, cfg, prompt_extra=prompt_extra, model=stage_model)
             disparadas.append((repo, issue))
             vagas -= 1
         except Exception as exc:
@@ -910,7 +1074,7 @@ def run(ctx: object) -> None:
                 )
                 continue
             try:
-                _dispatch_reviewer(ctx, repo, issue, cfg)
+                _dispatch_reviewer(ctx, repo, issue, cfg, model=stage_model)
             except Exception as exc:
                 logger.error(
                     "deployment: erro ao despachar reviewer para %s#%s: %s",
@@ -969,7 +1133,7 @@ def run(ctx: object) -> None:
             try:
                 prompt_extra_rework = squad.dispatch_prompt_extra if squad else ""
                 _dispatch_rework(ctx, repo, issue, pr_number_rework, iteration, cfg,
-                                 prompt_extra=prompt_extra_rework)
+                                 prompt_extra=prompt_extra_rework, model=stage_model)
             except Exception as exc:
                 logger.error(
                     "deployment: erro ao despachar rework para %s#%s: %s",
@@ -978,6 +1142,133 @@ def run(ctx: object) -> None:
 
     if merge_prs:
         _execute_auto_merges(ctx, merge_prs, chat_id, provider)
+
+    # ── Estágio conflito: apenas ROTEIA (resolução é BO #4, fora de escopo) ─
+    if conflito:
+        _route_conflito(ctx, conflito, chat_id)
+
+
+# ── Estágio conflito: roteamento (resolução deferida a BO #4) ──────────────
+
+def _route_conflito(ctx: object, items: list, chat_id: str) -> None:
+    """Roteia PRs com crewflow:conflito — notifica; NÃO resolve (BO #4).
+
+    Este é o "estágio conflito" da arquitetura de cron por estágio: ele apenas
+    SURFACE os PRs em conflito para acompanhamento humano. A resolução
+    automática (rebase/merge da base, reaplicar mudanças) é BO #4 e está
+    explicitamente fora do escopo desta feature (BO #1).
+    """
+    vm = f" (voice_maybe chat_id {chat_id}, intent auto)" if chat_id else ""
+    linhas = "\n".join(f"  - {r.item.key}: {r.item.title}" for r in items)
+    logger.info("deployment: %d PR(s) em conflito roteado(s) (resolução via BO #4)", len(items))
+    ctx.notify(  # type: ignore[attr-defined]
+        f"KiroCrew Flow: {len(items)} PR(s) com crewflow:conflito — "
+        f"resolução manual (auto-resolve é BO #4).{vm}\n{linhas}"
+    )
+
+
+# ── Config por estágio: modelo e log ───────────────────────────────────────
+
+def _stage_config(cfg: dict, stage: str | None) -> dict:
+    """Retorna o dict de config do estágio (``stages.<stage>``) ou {}."""
+    if stage is None:
+        return {}
+    stages = cfg.get("stages")
+    if not isinstance(stages, dict):
+        return {}
+    entry = stages.get(stage)
+    return entry if isinstance(entry, dict) else {}
+
+
+def _stage_model(cfg: dict, stage: str | None) -> str | None:
+    """Resolve o modelo por estágio a partir de ``stages.<stage>.model``.
+
+    None quando não configurado — o dispatch mantém o body de sempre (sem a
+    chave ``model``), preservando o comportamento atual.
+    """
+    model = _stage_config(cfg, stage).get("model")
+    return str(model) if model else None
+
+
+def _stage_log_path(cfg: dict, stage: str) -> str:
+    """Resolve o caminho de log por estágio.
+
+    Usa ``stages.<stage>.log`` quando definido; caso contrário, cai num default
+    isolado por estágio (~/.kiro/crew/crons/deployment-<stage>.log). Log
+    separado por estágio = observabilidade isolada (ganho #1 da feature).
+    """
+    log = _stage_config(cfg, stage).get("log")
+    if log:
+        return os.path.expanduser(str(log))
+    return os.path.expanduser(f"~/.kiro/crew/crons/deployment-{stage}.log")
+
+
+def _configure_stage_logging(cfg: dict, stage: str) -> logging.Handler | None:
+    """Anexa um FileHandler isolado ao logger deste estágio e o retorna.
+
+    Projetado para ser fixture-friendly: retorna o handler para que o chamador
+    (ou um teste) possa removê-lo depois. Falhas em abrir o arquivo de log são
+    toleradas (não devem impedir o ciclo) — retorna None nesse caso.
+    """
+    path = _stage_log_path(cfg, stage)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        handler = logging.FileHandler(path)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        handler.set_name(f"crewflow-stage-{stage}")
+        logger.addHandler(handler)
+        logger.info("deployment: cron do estágio '%s' — log em %s", stage, path)
+        return handler
+    except OSError as exc:
+        logger.warning("deployment: não foi possível abrir log do estágio '%s': %s", stage, exc)
+        return None
+
+
+def _run_one_stage(ctx: object, stage: str) -> None:
+    """Executa um único estágio com log isolado e remove o handler ao fim."""
+    cfg = _load_config()
+    handler = _configure_stage_logging(cfg, stage)
+    try:
+        _run_stages(ctx, stage=stage)
+    finally:
+        if handler is not None:
+            logger.removeHandler(handler)
+            handler.close()
+
+
+# ── Entrypoints de cron por estágio (registrados pelo install-cron.sh) ─────
+
+def run_dev(ctx: object) -> None:
+    """Cron do estágio DEV — issues em crewflow:todo → dispatch dev/re-trabalho.
+
+    Modelo forte por padrão (config: stages.dev.model). Também é o dono das
+    ações informativas do scan de todo/spec (spec_invalid, blocked_bypass,
+    rebrand, notify_human).
+    """
+    _run_one_stage(ctx, STAGE_DEV)
+
+
+def run_reviewer(ctx: object) -> None:
+    """Cron do estágio REVIEWER — PRs em crewflow:review → dispatch reviewer.
+
+    Modelo mais leve/rápido por padrão (config: stages.reviewer.model).
+    """
+    _run_one_stage(ctx, STAGE_REVIEWER)
+
+
+def run_merge(ctx: object) -> None:
+    """Cron do estágio MERGE — crewflow:review+reviewed aprovado → merge squash."""
+    _run_one_stage(ctx, STAGE_MERGE)
+
+
+def run_conflito(ctx: object) -> None:
+    """Cron do estágio CONFLITO — PRs com crewflow:conflito → roteia (BO #4).
+
+    Escopo BO #1: apenas roteia/notifica. A resolução automática é BO #4.
+    """
+    _run_one_stage(ctx, STAGE_CONFLITO)
 
 
 def _notify_human_actions(ctx: object, items: list, chat_id: str) -> None:
@@ -1329,6 +1620,7 @@ def _dispatch_rework(
     iteration: int,
     cfg: dict,
     prompt_extra: str = "",
+    model: str | None = None,
 ) -> None:
     """Fire-and-forget POST /api/chat para a sessão one-shot de re-trabalho.
 
@@ -1348,12 +1640,7 @@ def _dispatch_rework(
         )
         return
 
-    body = json.dumps({
-        "message": message,
-        "agent": cfg.get("agent") or "kirocrew",
-        "slot": slot,
-        "memory_mode": "temporary",
-    }).encode()
+    body = _chat_body(message, cfg.get("agent") or "kirocrew", slot, model)
     req = _u.Request(
         f"http://localhost:{ctx._port}/api/chat",  # type: ignore[attr-defined]
         data=body,
@@ -1384,6 +1671,7 @@ def _dispatch_reviewer(
     repo: str,
     issue: dict,
     cfg: dict,
+    model: str | None = None,
 ) -> None:
     """Fire-and-forget POST /api/chat para a sessão one-shot do kiro-reviewer.
 
@@ -1430,12 +1718,12 @@ def _dispatch_reviewer(
     slot = f"reviewer-{short}-{issue_number}"
 
     import urllib.request as _u
-    body = json.dumps({
-        "message": _reviewer_prompt(repo, pr_number, issue_number),
-        "agent": cfg.get("agent") or "kirocrew",
-        "slot": slot,
-        "memory_mode": "temporary",
-    }).encode()
+    body = _chat_body(
+        _reviewer_prompt(repo, pr_number, issue_number),
+        cfg.get("agent") or "kirocrew",
+        slot,
+        model,
+    )
     req = _u.Request(
         f"http://localhost:{ctx._port}/api/chat",  # type: ignore[attr-defined]
         data=body,

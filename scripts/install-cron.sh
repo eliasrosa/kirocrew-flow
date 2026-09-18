@@ -9,10 +9,10 @@
 #      (o script é executado de ~/.kiro/crew/crons/, não do repo)
 #   3. Copia deployment/deployment.config.yaml se não existir ainda
 #
-# Depois de instalar, registre o cron no Kiro Crew (uma vez):
-#   cron_add(name="crewflow-scan",
-#            script="~/.kiro/crew/crons/deployment.py:run",
-#            every=600)
+# Depois de instalar, o script imprime as instruções de cron_add:
+#   - Sem bloco `stages:` na config → uma cron monolítica crewflow-scan → run.
+#   - Com bloco `stages:` → N crons, uma por estágio (crewflow-dev/reviewer/
+#     merge/conflito → deployment.py:run_<stage>), cada uma com seu interval.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -75,10 +75,77 @@ else
     echo "       dev_root: /caminho/para/seus/clones"
 fi
 
+# 4. Gera as instruções de cron_add:
+#    - Se a config define um bloco `stages:`, gera N crons (uma por estágio),
+#      cada uma apontando para o entrypoint deployment.py:run_<stage> com o
+#      interval configurado (ou o default por estágio).
+#    - Caso contrário, mantém a única cron monolítica crewflow-scan → run.
 echo ""
 echo "=== Instalação completa ==="
 echo ""
-echo "  Para registrar o cron (uma vez), no dashboard do Kiro Crew:"
-echo "    cron_add(name=\"crewflow-scan\","
-echo "             script=\"~/.kiro/crew/crons/deployment.py:run\","
-echo "             every=600)"
+python3 - "$CONFIG_DST" <<'PYEOF'
+import sys, os, re
+
+config_path = sys.argv[1]
+
+# Defaults de interval por estágio (segundos). reviewer varre mais rápido.
+DEFAULTS = {"dev": 600, "reviewer": 180, "merge": 300, "conflito": 900}
+STAGES = ("dev", "reviewer", "merge", "conflito")
+
+stages_cfg = {}
+try:
+    try:
+        import yaml  # type: ignore
+        with open(config_path) as f:
+            data = yaml.safe_load(f) or {}
+        raw = data.get("stages")
+        if isinstance(raw, dict):
+            stages_cfg = raw
+    except ImportError:
+        # Fallback sem PyYAML: detecta um bloco `stages:` de forma simples e
+        # extrai os nomes de estágio conhecidos e seus `interval:`.
+        with open(config_path) as f:
+            lines = f.readlines()
+        in_stages = False
+        current = None
+        for line in lines:
+            if re.match(r"^stages:\s*$", line):
+                in_stages = True
+                continue
+            if in_stages:
+                # Fim do bloco: primeira linha não-indentada não-vazia/coment.
+                if line.strip() and not line.startswith((" ", "\t")) and not line.lstrip().startswith("#"):
+                    break
+                m = re.match(r"^\s{2}(\w+):\s*$", line)
+                if m and m.group(1) in STAGES:
+                    current = m.group(1)
+                    stages_cfg.setdefault(current, {})
+                    continue
+                mi = re.match(r"^\s{4}interval:\s*(\d+)", line)
+                if mi and current:
+                    stages_cfg[current]["interval"] = int(mi.group(1))
+except Exception as exc:
+    print(f"  ⚠️  não foi possível ler {config_path} ({exc}) — usando modo monolítico")
+    stages_cfg = {}
+
+configured = [s for s in STAGES if s in stages_cfg]
+
+if configured:
+    print("  Cron por estágio detectado. Registre N crons (uma por estágio),")
+    print("  no dashboard do Kiro Crew:")
+    print("")
+    for stage in configured:
+        entry = stages_cfg.get(stage) or {}
+        interval = entry.get("interval") or DEFAULTS[stage]
+        print(f'    cron_add(name="crewflow-{stage}",')
+        print(f'             script="~/.kiro/crew/crons/deployment.py:run_{stage}",')
+        print(f'             every={interval})')
+        print("")
+else:
+    print("  Nenhum bloco `stages:` na config — modo monolítico (cron única).")
+    print("  Para registrar o cron (uma vez), no dashboard do Kiro Crew:")
+    print("")
+    print('    cron_add(name="crewflow-scan",')
+    print('             script="~/.kiro/crew/crons/deployment.py:run",')
+    print('             every=600)')
+PYEOF

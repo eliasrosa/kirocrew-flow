@@ -51,6 +51,12 @@ class SquadScanConfig:
     projects: tuple[str, ...]
     repos: frozenset[str]
     data_dir: str | None = None  # None = usa o default ~/.kiro/crew/kirocrew-flow
+    # Escopo opcional de estados a varrer (cron por estágio — FEAT-002/BO #1).
+    # None = varre TODOS os estados (comportamento monolítico, padrão).
+    # Quando definido, o scan lista APENAS esses estados, preservando o custo
+    # zero-token de cada cron por estágio (o cron dev só varre TODO, o reviewer
+    # só REVIEW, etc.). O cache SQLite continua por-squad e inalterado.
+    states: frozenset[State] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +111,9 @@ def scan_candidates(
 
     for project in config.projects:
         try:
-            project_results = _scan_project(project, provider, conn, squad, seen_keys)
+            project_results = _scan_project(
+                project, provider, conn, squad, seen_keys, config.states
+            )
             results.extend(project_results)
             active_keys.update(r.item.key for r in project_results)
         except ProviderError as exc:
@@ -126,17 +134,21 @@ def _scan_project(
     conn: sqlite3.Connection,
     squad: Squad,
     seen_keys: set[str],
+    states: frozenset[State] | None = None,
 ) -> list[ScanResult]:
     """Varre um único projeto e retorna os resultados.
 
     ``seen_keys`` é compartilhado entre todos os projetos do ciclo: uma key já
     emitida por um projeto anterior é ignorada aqui (deduplication por key).
+
+    ``states`` restringe a varredura a um subconjunto de estados (cron por
+    estágio). None = todos os estados (padrão monolítico).
     """
     results: list[ScanResult] = []
 
     # Lista issues com qualquer label crewflow:* de estado
     # Não filtra por estado aqui — o domínio decide o que fazer com cada uma
-    all_items = _fetch_all_labeled_items(project, provider)
+    all_items = _fetch_all_labeled_items(project, provider, states)
 
     logger.debug("scan: %d issues com labels crewflow:* em %s", len(all_items), project)
 
@@ -160,13 +172,24 @@ def _scan_project(
     return results
 
 
-def _fetch_all_labeled_items(project: str, provider: IssueProvider) -> list[dict]:
-    """Lista todas as issues com labels crewflow:* (todos os estados)."""
+def _fetch_all_labeled_items(
+    project: str,
+    provider: IssueProvider,
+    states: frozenset[State] | None = None,
+) -> list[dict]:
+    """Lista as issues com labels crewflow:* de estado.
+
+    ``states=None`` varre TODOS os estados (padrão monolítico). Quando um
+    subconjunto é passado (cron por estágio), lista APENAS esses estados —
+    preservando o custo zero-token por estágio (menos chamadas de API).
+    """
     all_items: list[dict] = []
     seen: set[str] = set()
 
+    scan_states = State if states is None else [s for s in State if s in states]
+
     # Busca por cada estado — a API filtra por uma label por vez
-    for s in State:
+    for s in scan_states:
         try:
             items = provider.list_by_state(project, s.value)
             for item in items:

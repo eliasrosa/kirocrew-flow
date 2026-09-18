@@ -68,3 +68,42 @@ vault_root: ""
 
 # Agente do Kiro Crew usado nas sessões one-shot.
 agent: "kirocrew"
+
+# ── Cron por estágio (opcional — BO #1) ────────────────────────────────────
+# Separa o dispatch em crons independentes, uma por estágio do fluxo:
+#   dev      → issues em crewflow:todo → dispatch dev (modelo forte)
+#   reviewer → PRs em crewflow:review → dispatch reviewer (modelo mais leve)
+#   merge    → crewflow:reviewed aprovado → merge squash + labels
+#   conflito → PRs com crewflow:conflito → roteia (resolução é BO #4, futuro)
+#
+# Ganhos: log isolado por estágio, modelo por ação, blast radius menor e
+# interval por estágio (reviewer pode varrer mais rápido que dev).
+#
+# COMPATIBILIDADE: se você OMITIR o bloco `stages:` abaixo, o deployment cai no
+# comportamento monolítico atual — uma única cron `crewflow-scan` → `run` que
+# varre tudo e executa todas as ações num ciclo só. Nada muda para quem já roda.
+#
+# Cada estágio aceita:
+#   model    — modelo/reasoning enviado no POST /api/chat daquele estágio.
+#              Threaded na chave JSON `model` do body. Omitido = body atual
+#              (sem a chave `model`), preservando o comportamento de sempre.
+#   interval — cadência do scan em segundos (usado pelo install-cron.sh ao
+#              gerar cada cron; ex.: reviewer mais rápido que dev).
+#   log      — caminho do arquivo de log isolado do estágio. Omitido = default
+#              ~/.kiro/crew/crons/deployment-<stage>.log
+#
+# stages:
+#   dev:
+#     model: claude-sonnet-4        # modelo forte para implementação
+#     interval: 600                 # varre crewflow:todo a cada 10 min
+#     log: ~/.kiro/crew/crons/deployment-dev.log
+#   reviewer:
+#     model: claude-haiku           # modelo mais leve/rápido para review
+#     interval: 180                 # reviewer varre mais rápido
+#     log: ~/.kiro/crew/crons/deployment-reviewer.log
+#   merge:
+#     interval: 300                 # merge não usa modelo (ação de API)
+#     log: ~/.kiro/crew/crons/deployment-merge.log
+#   conflito:
+#     interval: 900                 # só roteia PRs em conflito (resolução: BO #4)
+#     log: ~/.kiro/crew/crons/deployment-conflito.log
