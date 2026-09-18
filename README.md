@@ -49,14 +49,55 @@ Aplique todas num repo:
 ## Como funciona
 
 ```
-squads/*.yaml → SquadConfig → scan_candidates() → executor.decide() → deployment.run()
+squads/*.yaml → SquadConfig → scan_candidates() → executor.decide() → deployment (run/run_<stage>)
 ```
 
 1. `scan_candidates()` varre as issues por labels `crewflow:*` sem gastar token — compara hash do estado atual com o cache SQLite, e só processa o que mudou.
-2. `executor.decide()` decide a ação (DISPATCH_DEV, DISPATCH_REVIEWER, NOTIFY_HUMAN, BLOCK, REBRAND ou SKIP) com base no template da squad e no estado da issue.
-3. `deployment.run()` executa a ação: dispara sessão one-shot, notifica humano ou aplica rebrand de template.
+2. `executor.decide()` decide a ação (DISPATCH_DEV, DISPATCH_REVIEWER, DISPATCH_REWORK, NOTIFY_HUMAN, BLOCK, REBRAND, MERGE_PR ou SKIP) com base no template da squad e no estado da issue.
+3. O driving adapter em `deployment/deployment.py` executa a ação: dispara sessão one-shot, notifica humano, aplica rebrand de template ou faz o merge squash + labels de um PR aprovado.
 
 A sessão one-shot **nunca mergeia e nunca faz deploy**. Ela entrega o PR em `crewflow:review` e encerra.
+
+### Cron por estágio (dev / reviewer / merge / conflito)
+
+O dispatch pode rodar como **crons independentes, uma por estágio do fluxo**, em vez
+de um único scan monolítico. Cada estágio é uma cron observadora do estado (padrão
+"cron-monitor por estágio"): filtra só as labels do seu estágio e executa só as ações
+que lhe pertencem.
+
+| Cron | Entrypoint | Estado observado | Ação |
+|---|---|---|---|
+| `crewflow-dev` | `deployment.py:run_dev` | `crewflow:todo` | dispatch dev / re-trabalho (modelo forte) |
+| `crewflow-reviewer` | `deployment.py:run_reviewer` | `crewflow:review` | dispatch reviewer (modelo mais leve/rápido) |
+| `crewflow-merge` | `deployment.py:run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | merge squash + labels |
+| `crewflow-conflito` | `deployment.py:run_conflito` | PRs com `crewflow:conflito` | roteia/notifica (resolução é BO #4, futuro) |
+
+O cron `crewflow-dev` também é o dono das ações informativas que nascem do scan de
+`todo`/`spec`: spec inválida, bypass bloqueado, rebrand e notificações de humano.
+
+Ganhos da separação:
+
+1. **Observabilidade** — cada cron tem seu log isolado (`stages.<stage>.log`, default
+   `~/.kiro/crew/crons/deployment-<stage>.log`), com histórico próprio por estágio.
+2. **Modelo por ação** — cada estágio manda seu próprio modelo no `POST /api/chat`
+   (`stages.<stage>.model`, threaded na chave JSON `model` do body): modelo forte no
+   dev, mais leve/rápido no reviewer.
+3. **Blast radius menor** — se a cron de merge quebra, dev e reviewer seguem rodando.
+4. **Interval por estágio** — cada cron varre na sua cadência (`stages.<stage>.interval`);
+   o reviewer pode varrer mais rápido que o dev.
+
+O scan zero-token é preservado: cada cron escopa o scan só aos estados do seu estágio.
+
+> **`crewflow:merge` continua SEMPRE manual.** A cron de merge só executa o fluxo de
+> squash + labels já existente para PRs aprovados — não há política nova de auto-merge.
+> A resolução automática de conflitos fica para o BO #4; a cron `crewflow-conflito`
+> apenas surface/roteia os PRs em conflito.
+
+**Compatibilidade:** se a config **não** define o bloco `stages:`, nada muda — o
+deployment cai no comportamento monolítico atual, uma única cron `crewflow-scan` →
+`deployment.py:run` que varre tudo e executa todas as ações num ciclo só. O body do
+`POST /api/chat` também continua idêntico (sem a chave `model`) quando nenhum modelo
+por estágio é configurado.
 
 ## Fluxos disponíveis (Fase 1)
 
@@ -116,6 +157,43 @@ routing:
 # copia deployment.config.yaml (se não existir).
 # Edite ~/.kiro/crew/crons/deployment.config.yaml com seus paths.
 ```
+
+Ao final, o `install-cron.sh` imprime as linhas de `cron_add(...)` para você registrar
+no dashboard do Kiro Crew. O que ele emite depende da config:
+
+**Sem bloco `stages:` (monolítico — comportamento padrão):**
+
+```
+cron_add(name="crewflow-scan",
+         script="~/.kiro/crew/crons/deployment.py:run",
+         every=600)
+```
+
+**Com bloco `stages:` (uma cron por estágio):** ele emite N linhas, uma por estágio
+configurado, cada uma no entrypoint `run_<stage>` e no `interval` da config (ou no
+default por estágio: dev=600, reviewer=180, merge=300, conflito=900):
+
+```
+cron_add(name="crewflow-dev",
+         script="~/.kiro/crew/crons/deployment.py:run_dev",
+         every=600)
+
+cron_add(name="crewflow-reviewer",
+         script="~/.kiro/crew/crons/deployment.py:run_reviewer",
+         every=180)
+
+cron_add(name="crewflow-merge",
+         script="~/.kiro/crew/crons/deployment.py:run_merge",
+         every=300)
+
+cron_add(name="crewflow-conflito",
+         script="~/.kiro/crew/crons/deployment.py:run_conflito",
+         every=900)
+```
+
+Cada estágio aceita `model`, `interval` e `log` próprios sob o mapa `stages:` da
+config — veja `config.example.yaml` para o schema completo. Omitir `stages:` mantém
+a cron única `crewflow-scan`.
 
 ### 3. Aplique as labels
 

@@ -107,6 +107,44 @@ armazenado. Se não mudou, a issue é ignorada. Token só gasto quando há resul
 A sessão one-shot **nunca mergeia e nunca faz deploy**. Ela entrega o PR em
 `crewflow:review` e encerra. Uma passada.
 
+### Cron por estágio (dev / reviewer / merge / conflito)
+
+O dispatch pode ser separado em **crons independentes, uma por estágio do fluxo**
+(decisão de design travada: "cron-monitor por estágio" — cada estágio = 1 cron
+observadora do estado). O `deployment.py` expõe um entrypoint por estágio; o
+`install-cron.sh` gera uma cron para cada um:
+
+| Cron | Entrypoint | Estado observado | Ação |
+|---|---|---|---|
+| `crewflow-dev` | `run_dev` | `crewflow:todo` | dispatch dev / re-trabalho + ações informativas (spec inválida, bypass bloqueado, rebrand, notify_human) |
+| `crewflow-reviewer` | `run_reviewer` | `crewflow:review` | dispatch reviewer |
+| `crewflow-merge` | `run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | merge squash + labels (fluxo já existente) |
+| `crewflow-conflito` | `run_conflito` | PRs com `crewflow:conflito` | apenas roteia/notifica |
+
+Cada cron:
+
+- **Escopa o scan aos estados do seu estágio** — o scan zero-token é preservado por
+  estágio (o cron dev só varre `crewflow:todo`; reviewer/merge/conflito só `crewflow:review`).
+- **Executa só as ações que lhe pertencem** — as demais categorias são ignoradas
+  (roteamento isolado); a decisão continua vindo do mesmo `executor.decide()`.
+- **Aceita modelo próprio via config** (`stages.<stage>.model`) — threaded na chave
+  JSON `model` do `POST /api/chat` (modelo forte no dev, mais leve/rápido no reviewer).
+- **Tem log isolado** (`stages.<stage>.log`, default `~/.kiro/crew/crons/deployment-<stage>.log`)
+  e cadência própria (`stages.<stage>.interval`).
+
+`crewflow:conflito` **não** é um estado/modificador do modelo de labels — é um sinal
+externo. A cron `crewflow-conflito` apenas surface os PRs em conflito para
+acompanhamento humano; **a resolução automática é o BO #4** e está fora do escopo aqui.
+
+**Compatibilidade:** se a config **não** define o bloco `stages:`, o motor cai no
+comportamento monolítico — uma única cron `crewflow-scan` → `run` que varre tudo e
+executa todas as ações num ciclo só (o body do `POST /api/chat` também fica idêntico,
+sem a chave `model`). Nada muda para quem já roda.
+
+As travas invioláveis seguem valendo em qualquer modo: a cron de merge só faz o squash +
+labels já existente (**nenhuma política nova de auto-merge**) e **a automação NUNCA
+mergeia e NUNCA faz deploy** — continua sendo trava de produto.
+
 ## Lock anti-loop: `crewflow:reviewed`
 
 Uma análise por SHA. O robô de review adiciona `crewflow:reviewed` depois de

@@ -232,6 +232,20 @@ python3 -m ruff check flow/ && python3 -m mypy flow/ --ignore-missing-imports &&
 - `deployment.py` é o **driving adapter** da Fase 1. Quando a arquitetura for
   conectada de ponta a ponta, ele só precisará de `load_squad()`, `scan_candidates()`
   e `executor.decide()` — toda a lógica de negócio já está nos módulos.
+- **Cron por estágio (BO #1):** além do entrypoint monolítico `run(ctx)`, o driving
+  adapter expõe um entrypoint por estágio — `run_dev`, `run_reviewer`, `run_merge`,
+  `run_conflito` (constantes `STAGE_DEV`/`STAGE_REVIEWER`/`STAGE_MERGE`/`STAGE_CONFLITO`).
+  Todos delegam ao corpo compartilhado `_run_stages(ctx, stage=...)`; `run()` chama
+  `_run_stages(ctx, stage=None)` e permanece byte-for-byte retrocompatível. Cada estágio
+  escopa o scan aos seus estados (`_stage_states`), executa só suas categorias de ação
+  (`_STAGE_CATEGORIES`), resolve modelo (`stages.<stage>.model` via `_stage_model`,
+  threaded na chave JSON `model` do `POST /api/chat` só quando presente) e log isolado
+  (`stages.<stage>.log` via `_stage_log_path`). O `install-cron.sh` gera uma cron por
+  estágio quando a config tem bloco `stages:`, ou uma única `crewflow-scan` → `run`
+  quando não tem. **Adicionar um estágio:** defina a constante `STAGE_*`, mapeie seus
+  estados em `_stage_states`, suas categorias em `_STAGE_CATEGORIES`, exponha um
+  `run_<stage>` que chame `_run_one_stage(ctx, STAGE_*)`, e adicione o nome à lista
+  `STAGES`/defaults de interval no `install-cron.sh`.
 - **Workspace isolado (Fase 2):** cada dispatch cria um worktree efêmero em
   `<dev_root>/.esteira-worktrees/<repo-short>-<issue_number>`. Use sempre
   `_worktree_path(dev_root, repo, issue_number)` para construir o caminho — é a
