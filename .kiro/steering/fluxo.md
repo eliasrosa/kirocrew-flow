@@ -26,7 +26,7 @@ flowchart TD
     C -->|vigia dispara sessão one-shot| D["🔵 crewflow:dev<br/>(implementa + valida local)"]
     D --> E["🔀 PR aberto<br/>release/* → main"]
     E --> R["🟣 crewflow:review"]
-    R --> BOT["🤖 code review automatizado<br/>(marca crewflow:reviewed)"]
+    R --> BOT["🤖 code review automatizado<br/>(gate único: CI + comentários + diff)<br/>(marca crewflow:reviewed se tudo verde)"]
     BOT --> G1{"GATE 2<br/>TL aprova o review?"}
     G1 -.->|reprova| D
     G1 -->|aprova| HML["🚀 Dev faz deploy HML<br/>MANUALMENTE"]
@@ -70,7 +70,7 @@ sobrepostos. **Modificador de parada tem prioridade sobre o estado.**
 |---|---|---|
 | `crewflow:blocked` | 🔴 `#DC2626` | bloqueado — **para tudo** (prioridade sobre o estado) |
 | `crewflow:running` | 🟠 `#F97316` | trabalho em andamento no estado atual |
-| `crewflow:reviewed` | ⚫ `#6B7280` | lock anti-loop: já analisado neste SHA |
+| `crewflow:reviewed` | ⚫ `#6B7280` | lock anti-loop: review aprovado neste SHA (pipeline verde + comentários resolvidos) — destrava o merge |
 | `crewflow:hml-bypass` | 🟧 `#C2410C` | **exceção auditada:** hotfix foi direto pra PRD sem HML — exige justificativa no comentário (o motor **bloqueia o merge** sem ela) |
 | `crewflow:changes-requested` | 🟣 `#9333EA` | reviewer pediu mudança — **re-trabalho na mesma PR** (teto: N rounds → NOTIFY_HUMAN tl) |
 
@@ -115,8 +115,8 @@ Em vez de um único cron monolítico (`run`), a esteira pode ser dividida em
 | Entrypoint | Estado alvo | Ação | Intervalo recomendado |
 |---|---|---|---|
 | `run_dev` | `crewflow:todo` | `DISPATCH_DEV` — implementa + abre PR | 600s (10 min) |
-| `run_reviewer` | `crewflow:review` (sem `crewflow:reviewed`) | `DISPATCH_REVIEWER` — code review | 300s (5 min) |
-| `run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | `MERGE_PR` — merge squash | 120s (2 min) |
+| `run_reviewer` | `crewflow:review` (sem `crewflow:reviewed`) | `DISPATCH_REVIEWER` — gate único: CI + comentários + diff | 300s (5 min) |
+| `run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | `MERGE_PR` — merge squash (**nunca com CI vermelha**) | 120s (2 min) |
 | `run_conflito` | `crewflow:changes-requested` | `DISPATCH_REWORK` — re-trabalho | 300s (5 min) |
 
 O modelo por estágio é configurável via `stage_models` na `deployment.config.yaml`:
@@ -132,11 +132,37 @@ stage_models:
 O entrypoint legado `run` ainda funciona e orquestra todos os 4 estágios em
 sequência — útil para migração gradual ou modo de aviso (auto_dispatch=false).
 
+## GATE 2 — code review é um gate único
+
+O code review automatizado **não valida só o diff**. É um **gate único consolidado**
+que só aprova quando as três condições estão satisfeitas ao mesmo tempo:
+
+1. **Pipeline (CI) verde** — todos os checks do PR concluídos com sucesso. Check
+   vermelho ou ainda pendente = NÃO aprovado.
+2. **Comentários da PR resolvidos** — nenhuma thread de review em aberto. Comentário
+   não resolvido conta como pedido de mudança pendente.
+3. **Zero pedidos de mudança** no diff.
+
+Independentemente do resultado, o review posta o **resultado completo nos dois
+lugares** — na PR **e** na issue responsável: o que foi feito, o link do PR, o
+status, o resultado da CI e os comentários. A PR e a issue recebem a mesma
+informação completa, nunca parcial.
+
 ## Lock anti-loop: `crewflow:reviewed`
 
-Uma análise por SHA. O robô de review adiciona `crewflow:reviewed` depois de
-comentar. Se a label já está lá, o executor ignora a issue. Quando o dev faz um
-novo push, a label é removida e a próxima varredura dispara nova análise.
+Uma análise por SHA. O robô de review adiciona `crewflow:reviewed` **somente** quando
+o gate único passa (pipeline verde **E** comentários resolvidos **E** zero pedidos de
+mudança) — é isso que destrava o caminho do approve/merge (BO #5). Se a CI está
+vermelha/pendente, há comentário não resolvido ou algum pedido de mudança, a label
+**não** é aplicada e o TL decide.
+
+Se a label já está lá, o executor ignora a issue. Quando o dev faz um novo push, a
+label é removida e a próxima varredura dispara nova análise.
+
+Mesmo com `crewflow:reviewed` aplicado, o merge continua **sempre manual**: o
+`run_merge` só sinaliza um PR apto e **nunca mergeia com a pipeline vermelha** — o
+`decide()` recebe o estado da CI injetado e escala para `NOTIFY_HUMAN tl` em vez de
+`MERGE_PR` quando a pipeline não está verde.
 
 ## Travas de segurança
 

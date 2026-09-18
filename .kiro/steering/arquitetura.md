@@ -12,7 +12,7 @@ description: Arquitetura hexagonal, stack, convenções de código e qualidade d
 |---|---|---|
 | Linguagem | **Python 3.12** | |
 | Servidor web | **aiohttp** | NÃO usar FastAPI, Flask, Starlette ou Pydantic |
-| Testes | **pytest** + **pytest-cov** | 242 testes, 75% de cobertura mínima |
+| Testes | **pytest** + **pytest-cov** | 75% de cobertura mínima (fail-under) |
 | Linting | **ruff** | zero warnings permitidos |
 | Type check | **mypy** | `--ignore-missing-imports` no CI |
 
@@ -265,6 +265,38 @@ Teto de iterações: `gates.exceeded_review_iterations()` controla o cap (defaul
 Após o teto, o executor escala para `NOTIFY_HUMAN tl` em vez de continuar despachando.
 O número de iterações é registrado em `StateComment.review_iterations` (campo
 `**Iterações de review:**` no comentário da issue).
+
+### Gate único de review (CI + comentários + diff)
+
+O code review é um **gate único consolidado**: valida a pipeline inteira (CI) E os
+comentários da PR, não só o diff. As peças, respeitando o isolamento do domínio:
+
+- **`github_transport.get_pr_checks_status(owner_repo, pr_number)`** — lê o
+  `statusCheckRollup` do PR via `gh pr view` e reduz para um único rótulo:
+  `'green' | 'red' | 'pending' | 'none'` (o pior estado domina). Fachada patchável.
+- **`github_client.get_pr_ci_status(project, pr_number)`** — wrapper que delega ao
+  transport e satisfaz a superfície do adapter.
+- **`deployment._check_pr_ci(repo, pr_number)`** — driving-adapter helper que chama
+  o client e reduz o rótulo a `bool | None`: `green → True`, `red`/`pending → False`,
+  `none`/erro → `None` (nunca propaga exceção; falha de I/O degrada para `None`).
+- **`ReviewerResult.ci_green: bool | None`** e **`ReviewerResult.unresolved_comments:
+  tuple[str, ...]`** (em `flow/audit/state_comment.py`) — carregam o estado da
+  pipeline e os comentários pendentes da PR. `is_auto_mergeable` agora exige
+  `approved` E zero `comments` E `ci_green is not False` E zero `unresolved_comments`.
+  `ci_green=None` (legado/Jira sem CI) **não** bloqueia, espelhando a tolerância a
+  informação ausente. Os campos são renderizados/parseados de forma retrocompatível
+  e há um `render_issue_review_result` para postar o resultado completo na issue.
+- **`executor.decide(..., pr_ci_green: bool | None)`** — o estado da CI é **INJETADO**
+  como parâmetro puro. O domínio nunca consulta a CI: quando `pr_ci_green is False`,
+  o gate `REVIEW` + `REVIEWED` retorna `NOTIFY_HUMAN tl` em vez de `MERGE_PR`, de modo
+  que uma pipeline vermelha nunca mergeia. Reafirma a regra de isolamento: toda
+  decisão externa (CI incluída) chega por parâmetro, nunca por I/O dentro do domínio.
+
+O `deployment` posta o resultado completo (o que foi feito + link do PR + status +
+resultado da CI + comentários) tanto na PR (`render_pr_review_comment`) quanto na
+issue (`render_issue_review_result`). O `reviewer.md` instrui o agente a validar a
+CI (`gh pr checks` / `statusCheckRollup`), confirmar os comentários resolvidos e só
+adicionar `crewflow:reviewed` com CI verde E comentários resolvidos E zero mudanças.
 
 ### Convenção de placeholders
 

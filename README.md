@@ -32,7 +32,7 @@ crewflow:spec → crewflow:ready → crewflow:todo → crewflow:dev → crewflow
 |---|---|
 | `crewflow:blocked` | Para tudo (prioridade sobre o estado) |
 | `crewflow:running` | Trabalho em andamento |
-| `crewflow:reviewed` | Lock anti-loop: já analisado neste SHA |
+| `crewflow:reviewed` | Lock anti-loop: review aprovado neste SHA (pipeline verde + comentários resolvidos) — habilita o merge |
 | `crewflow:hml-bypass` | Exceção auditada: hotfix pulou o HML (exige justificativa) |
 | `crewflow:changes-requested` | Reviewer pediu mudança — dev corrige na mesma PR e re-submete |
 
@@ -57,6 +57,20 @@ squads/*.yaml → SquadConfig → scan_candidates() → executor.decide() → de
 3. `deployment.run()` executa a ação: dispara sessão one-shot, notifica humano ou aplica rebrand de template.
 
 A sessão one-shot **nunca mergeia e nunca faz deploy**. Ela entrega o PR em `crewflow:review` e encerra.
+
+### Code review é um gate único (pipeline + comentários + diff)
+
+O code review automatizado **não valida só o diff**. Ele é um **gate único consolidado** que checa três coisas:
+
+1. **A pipeline inteira (CI)** — todos os checks do PR têm que estar verdes.
+2. **Os comentários da PR** — todas as threads de review têm que estar resolvidas.
+3. **O diff** — corretude, cobertura de testes e convenções do projeto.
+
+Independentemente do resultado, o review posta o **resultado completo nos dois lugares** — na PR **e** na issue: o que foi feito, o link do PR, o status, o resultado da CI e os comentários pendentes. A PR e a issue recebem a mesma informação completa, nunca parcial.
+
+Só quando a **pipeline está verde E os comentários estão resolvidos E não há pedidos de mudança** o review aplica `crewflow:reviewed`, que destrava o caminho do merge. Se a CI estiver vermelha/pendente, houver comentário não resolvido ou algum pedido de mudança, `crewflow:reviewed` **não** é aplicado e o TL decide.
+
+Mesmo com `crewflow:reviewed` aplicado, **o merge continua manual** (princípio 3): a automação nunca mergeia por conta própria. O motor só sinaliza que o PR está apto — quando a pipeline está vermelha, o merge automático fica bloqueado por segurança.
 
 ## Fluxos disponíveis (Fase 1)
 
@@ -125,7 +139,7 @@ Depois registre os crons no dashboard do Kiro Crew. Há duas opções:
 cron_add(name="crewflow-dev",      script="~/.kiro/crew/crons/deployment.py:run_dev",      every=600)
 # Reviewer: code review (PRs crewflow:review)
 cron_add(name="crewflow-reviewer", script="~/.kiro/crew/crons/deployment.py:run_reviewer", every=300)
-# Merge: merge squash (crewflow:review + crewflow:reviewed aprovado)
+# Merge: merge squash (crewflow:review + crewflow:reviewed aprovado, só com CI verde)
 cron_add(name="crewflow-merge",    script="~/.kiro/crew/crons/deployment.py:run_merge",    every=120)
 # Conflito: re-trabalho pós-review (crewflow:changes-requested)
 cron_add(name="crewflow-conflito", script="~/.kiro/crew/crons/deployment.py:run_conflito", every=300)
@@ -196,7 +210,7 @@ python3 -m pytest flow/tests/ --cov=flow --cov-report=term-missing
 python3 -m ruff check flow/ && python3 -m pytest flow/tests/ --cov=flow --cov-fail-under=75
 ```
 
-260 testes, 82% cobertura, ruff limpo (Fase 1).
+Suíte completa passando com cobertura acima do mínimo de 75%, ruff limpo.
 
 ## Dry-run — inspecionar sem despachar
 
