@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import tempfile
 from pathlib import Path
 
@@ -349,6 +350,125 @@ class TestLoadSquad:
             squads = load_squads_dir(tmp)
             assert len(squads) == 1
             assert squads[0].id == "my-squad"
+
+
+# ---------------------------------------------------------------------------
+# Fallback _mini_yaml (sem PyYAML) — parser mínimo embutido
+# ---------------------------------------------------------------------------
+
+# YAML de routing na forma MULTI-LINHA padrão (não inline). PyYAML parseia isto
+# nativamente; o fallback _mini_yaml precisa produzir a MESMA estrutura.
+MULTILINE_ROUTING_YAML = """\
+id: my-squad
+name: My Squad
+issue_provider: github
+repos:
+  - org/api-gateway2
+  - org/api-subscription2
+workflow_template: versao-c
+workflow_params:
+  merge_mode: manual
+  review_position: before_qa
+  allow_hml_bypass: true
+routing:
+  - match:
+      labels:
+        - crewflow:hotfix
+    workflow: hotfix-flow
+  - match:
+      labels:
+        - crewflow:bug
+    workflow: bug-flow
+  - default: feature-flow
+"""
+
+
+@pytest.fixture
+def _no_pyyaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Força `import yaml` a levantar ImportError, exercitando o fallback.
+
+    O código guarda `try: import yaml except ImportError: return _mini_yaml(...)`,
+    então basta fazer o import do módulo `yaml` falhar.
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "yaml":
+            raise ImportError("PyYAML indisponível (forçado no teste)")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+class TestMiniYamlFallback:
+    """Garante que o schema de squad funciona SEM PyYAML."""
+
+    def _write(self, text: str) -> str:
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            f.write(text)
+            return f.name
+
+    def test_import_yaml_falha_no_fixture(self, _no_pyyaml: None) -> None:
+        # Sanidade: o fixture realmente bloqueia o import do PyYAML.
+        with pytest.raises(ImportError):
+            import yaml  # noqa: F401
+
+    def test_multiline_routing_via_fallback(self, _no_pyyaml: None) -> None:
+        tmp = self._write(MULTILINE_ROUTING_YAML)
+        try:
+            sc = load_squad(tmp)
+        finally:
+            Path(tmp).unlink()
+        # As duas regras multi-linha + o default foram parseadas.
+        assert len(sc.routing) == 2
+        assert sc.default_workflow == "feature-flow"
+        # resolve_workflow usa as regras corretamente.
+        assert sc.resolve_workflow(frozenset({"crewflow:hotfix"})) == "hotfix-flow"
+        assert sc.resolve_workflow(frozenset({"crewflow:bug"})) == "bug-flow"
+        assert sc.resolve_workflow(frozenset({"crewflow:feature"})) == "feature-flow"
+
+    def test_multiline_debt_routing_resolve(self, _no_pyyaml: None) -> None:
+        # Exercita o template `debt` via routing multi-linha (issue de teste do motor).
+        yaml_txt = (
+            "id: sq\n"
+            "issue_provider: github\n"
+            "repos:\n"
+            "  - org/api\n"
+            "routing:\n"
+            "  - match:\n"
+            "      labels:\n"
+            "        - crewflow:debt\n"
+            "    workflow: debt-flow\n"
+            "  - default: feature-flow\n"
+        )
+        tmp = self._write(yaml_txt)
+        try:
+            sc = load_squad(tmp)
+        finally:
+            Path(tmp).unlink()
+        assert sc.resolve_workflow(frozenset({"crewflow:debt"})) == "debt-flow"
+
+    def test_inline_routing_ainda_funciona_via_fallback(self, _no_pyyaml: None) -> None:
+        # A forma inline `- match: {labels: [...]}` não pode regredir.
+        tmp = self._write(EXAMPLE_YAML)
+        try:
+            sc = load_squad(tmp)
+        finally:
+            Path(tmp).unlink()
+        assert len(sc.routing) == 2
+        assert sc.resolve_workflow(frozenset({"crewflow:hotfix"})) == "hotfix-flow"
+        assert sc.resolve_workflow(frozenset({"crewflow:bug"})) == "bug-flow"
+
+    def test_fallback_estrutura_igual_ao_pyyaml(self, _no_pyyaml: None) -> None:
+        # A estrutura crua produzida pelo fallback casa com a do example.yaml.
+        example = Path(__file__).parent.parent.parent / "squads" / "example.yaml"
+        raw = _mini_yaml(example)
+        assert raw["routing"][0] == {
+            "match": {"labels": ["crewflow:hotfix"]},
+            "workflow": "hotfix-flow",
+        }
+        assert raw["routing"][-1] == {"default": "feature-flow"}
+        assert raw["workflow_params"]["allow_hml_bypass"] is True
 
 
 # ---------------------------------------------------------------------------
