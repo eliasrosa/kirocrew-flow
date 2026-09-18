@@ -296,7 +296,7 @@ class TestReviewerResult:
 class TestRenderPrReviewComment:
     def test_aprovado_sem_comentarios(self) -> None:
         from flow.audit.state_comment import ReviewerResult, render_pr_review_comment
-        rr = ReviewerResult(approved=True, comments=[], sha=None, reviewer="kiro-reviewer")
+        rr = ReviewerResult(approved=True, comments=(), sha="", reviewer="kiro-reviewer")
         body = render_pr_review_comment(rr, issue_number=73)
         assert "## 🤖 KiroCrew Review" in body
         assert "**Resultado:** ✅ Aprovado" in body
@@ -310,7 +310,7 @@ class TestRenderPrReviewComment:
             "deployment.py: import local sem justificativa",
             "_dry_run_report(): skipped pode ser negativo",
         ]
-        rr = ReviewerResult(approved=False, comments=comments, sha=None, reviewer="kiro-reviewer")
+        rr = ReviewerResult(approved=False, comments=tuple(comments), sha="", reviewer="kiro-reviewer")
         body = render_pr_review_comment(rr, issue_number=73)
         assert "**Resultado:** ⚠️ Pedidos de mudança" in body
         assert "Pedidos de mudança" in body
@@ -320,7 +320,7 @@ class TestRenderPrReviewComment:
     def test_um_bullet_por_comentario(self) -> None:
         from flow.audit.state_comment import ReviewerResult, render_pr_review_comment
         comments = ["a", "b", "c"]
-        rr = ReviewerResult(approved=False, comments=comments, sha=None, reviewer="kiro-reviewer")
+        rr = ReviewerResult(approved=False, comments=tuple(comments), sha="", reviewer="kiro-reviewer")
         body = render_pr_review_comment(rr, issue_number=1
         )
         assert body.count("\n- ") == 3

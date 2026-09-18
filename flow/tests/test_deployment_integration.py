@@ -704,7 +704,7 @@ class TestReviewerPrompt:
 
         _rr_ko = ReviewerResult(
             approved=False,
-            comments=["<mudança 1>", "<mudança 2>"],
+            comments=("<mudança 1>", "<mudança 2>"),
             sha="<sha>",
             reviewer="kiro-reviewer",
         )
@@ -712,7 +712,7 @@ class TestReviewerPrompt:
         for line in exemplo_mudancas.splitlines():
             assert (f"     {line}" if line else line) in prompt
 
-        _rr_ok = ReviewerResult(approved=True, comments=[], sha="<sha>", reviewer="kiro-reviewer")
+        _rr_ok = ReviewerResult(approved=True, comments=(), sha="<sha>", reviewer="kiro-reviewer")
         exemplo_aprovado = render_pr_review_comment(_rr_ok, issue_number=42)
         for line in exemplo_aprovado.splitlines():
             assert (f"     {line}" if line else line) in prompt

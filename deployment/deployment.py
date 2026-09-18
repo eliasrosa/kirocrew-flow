@@ -718,10 +718,10 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
     # flow/audit/state_comment.py que os testes exercitam. Assim o formato
     # tem UMA definição: se o helper mudar, o prompt muda junto (sem drift).
     from flow.audit.state_comment import ReviewerResult
-    _rr_ok = ReviewerResult(approved=True, comments=[], sha="<sha>", reviewer="kiro-reviewer")
+    _rr_ok = ReviewerResult(approved=True, comments=(), sha="<sha>", reviewer="kiro-reviewer")
     _rr_ko = ReviewerResult(
         approved=False,
-        comments=["<mudança 1>", "<mudança 2>"],
+        comments=("<mudança 1>", "<mudança 2>"),
         sha="<sha>",
         reviewer="kiro-reviewer",
     )
