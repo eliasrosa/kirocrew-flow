@@ -27,7 +27,6 @@ Puro Python — sem I/O, testável sem mock.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC
 
@@ -233,45 +232,6 @@ def render(sc: StateComment) -> str:
         lines.append("")
 
     lines.append(MARKER_CLOSE)
-    return "\n".join(lines)
-
-
-def render_pr_review_comment(
-    approved: bool,
-    comments: Sequence[str],
-    issue_number: int,
-) -> str:
-    """Renderiza o corpo do comentário do reviewer a ser postado NO PR.
-
-    Formato (conforme issue #75):
-
-        ## 🤖 KiroCrew Review
-
-        **Resultado:** ✅ Aprovado    (ou ⚠️ Pedidos de mudança)
-
-        ### Pedidos de mudança      (apenas quando há comentários)
-        - <comentário 1>
-        - <comentário 2>
-
-        *Reviewer automático — issue #<issue_number>*
-
-    ``approved``      — True se o reviewer não pediu mudanças.
-    ``comments``      — pedidos de mudança (bullets); a seção só aparece se houver.
-    ``issue_number``  — número da issue de origem, citado no rodapé.
-
-    Puro — sem I/O.
-    """
-    resultado = "✅ Aprovado" if approved else "⚠️ Pedidos de mudança"
-    lines: list[str] = [
-        "## 🤖 KiroCrew Review",
-        "",
-        f"**Resultado:** {resultado}",
-    ]
-    if comments:
-        lines += ["", "### Pedidos de mudança"]
-        for c in comments:
-            lines.append(f"- {c}")
-    lines += ["", f"*Reviewer automático — issue #{issue_number}*"]
     return "\n".join(lines)
 
 

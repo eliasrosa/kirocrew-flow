@@ -698,21 +698,22 @@ class TestReviewerPrompt:
         prompt, apenas indentada). Se o helper e o prompt divergirem, quebra.
         """
         from deployment.deployment import _reviewer_prompt
-        from flow.audit.state_comment import render_pr_review_comment
+        from flow.audit.state_comment import ReviewerResult, render_pr_review_comment
 
         prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
 
-        exemplo_mudancas = render_pr_review_comment(
+        _rr_ko = ReviewerResult(
             approved=False,
             comments=["<mudança 1>", "<mudança 2>"],
-            issue_number=42,
+            sha="<sha>",
+            reviewer="kiro-reviewer",
         )
+        exemplo_mudancas = render_pr_review_comment(_rr_ko, issue_number=42)
         for line in exemplo_mudancas.splitlines():
             assert (f"     {line}" if line else line) in prompt
 
-        exemplo_aprovado = render_pr_review_comment(
-            approved=True, comments=[], issue_number=42
-        )
+        _rr_ok = ReviewerResult(approved=True, comments=[], sha="<sha>", reviewer="kiro-reviewer")
+        exemplo_aprovado = render_pr_review_comment(_rr_ok, issue_number=42)
         for line in exemplo_aprovado.splitlines():
             assert (f"     {line}" if line else line) in prompt
 

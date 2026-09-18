@@ -717,14 +717,16 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int) -> str:
     # Os exemplares abaixo são PRODUZIDOS pelos mesmos helpers puros de
     # flow/audit/state_comment.py que os testes exercitam. Assim o formato
     # tem UMA definição: se o helper mudar, o prompt muda junto (sem drift).
-    exemplo_aprovado = render_pr_review_comment(
-        approved=True, comments=[], issue_number=issue_number
-    )
-    exemplo_mudancas = render_pr_review_comment(
+    from flow.audit.state_comment import ReviewerResult
+    _rr_ok = ReviewerResult(approved=True, comments=[], sha="<sha>", reviewer="kiro-reviewer")
+    _rr_ko = ReviewerResult(
         approved=False,
         comments=["<mudança 1>", "<mudança 2>"],
-        issue_number=issue_number,
+        sha="<sha>",
+        reviewer="kiro-reviewer",
     )
+    exemplo_aprovado = render_pr_review_comment(_rr_ok, issue_number=issue_number)
+    exemplo_mudancas = render_pr_review_comment(_rr_ko, issue_number=issue_number)
     ref_issue = render_issue_pr_reference(pr_number, approved=True)
 
     def _indent(text: str, prefix: str = "     ") -> str:

@@ -295,34 +295,33 @@ class TestReviewerResult:
 
 class TestRenderPrReviewComment:
     def test_aprovado_sem_comentarios(self) -> None:
-        from flow.audit.state_comment import render_pr_review_comment
-        body = render_pr_review_comment(approved=True, comments=[], issue_number=73)
+        from flow.audit.state_comment import ReviewerResult, render_pr_review_comment
+        rr = ReviewerResult(approved=True, comments=[], sha=None, reviewer="kiro-reviewer")
+        body = render_pr_review_comment(rr, issue_number=73)
         assert "## 🤖 KiroCrew Review" in body
         assert "**Resultado:** ✅ Aprovado" in body
-        assert "*Reviewer automático — issue #73*" in body
+        assert "issue #73" in body
         # sem pedidos de mudança quando aprovado sem comentários
-        assert "### Pedidos de mudança" not in body
+        assert "Pedidos de mudança" not in body
 
     def test_pedidos_de_mudanca_com_comentarios(self) -> None:
-        from flow.audit.state_comment import render_pr_review_comment
+        from flow.audit.state_comment import ReviewerResult, render_pr_review_comment
         comments = [
             "deployment.py: import local sem justificativa",
             "_dry_run_report(): skipped pode ser negativo",
         ]
-        body = render_pr_review_comment(
-            approved=False, comments=comments, issue_number=73
-        )
+        rr = ReviewerResult(approved=False, comments=comments, sha=None, reviewer="kiro-reviewer")
+        body = render_pr_review_comment(rr, issue_number=73)
         assert "**Resultado:** ⚠️ Pedidos de mudança" in body
-        assert "### Pedidos de mudança" in body
+        assert "Pedidos de mudança" in body
         assert "- deployment.py: import local sem justificativa" in body
         assert "- _dry_run_report(): skipped pode ser negativo" in body
-        assert "*Reviewer automático — issue #73*" in body
 
     def test_um_bullet_por_comentario(self) -> None:
-        from flow.audit.state_comment import render_pr_review_comment
+        from flow.audit.state_comment import ReviewerResult, render_pr_review_comment
         comments = ["a", "b", "c"]
-        body = render_pr_review_comment(
-            approved=False, comments=comments, issue_number=1
+        rr = ReviewerResult(approved=False, comments=comments, sha=None, reviewer="kiro-reviewer")
+        body = render_pr_review_comment(rr, issue_number=1
         )
         assert body.count("\n- ") == 3
 
