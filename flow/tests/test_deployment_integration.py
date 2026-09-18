@@ -813,3 +813,166 @@ class TestRunDispatchReviewer:
             run(ctx)
 
         mock_disp_rev.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #73 — dry-run: inspeciona decisões sem efeitos colaterais
+# ---------------------------------------------------------------------------
+
+class TestDryRun:
+    """Quando dry_run está ativo (cfg ou env), nenhum efeito colateral dispara."""
+
+    def _make_ctx(self) -> mock.MagicMock:
+        ctx = mock.MagicMock()
+        ctx._port = 5000
+        ctx._secret = "secret"
+        ctx.job.id = "test-job"
+        return ctx
+
+    def _dry_config(self, dry: bool = True, auto: bool = True) -> dict:
+        cfg = _minimal_config(auto=auto)
+        if dry:
+            cfg["dry_run"] = True
+        return cfg
+
+    def _make_review_result(self) -> object:
+        """ScanResult em crewflow:review (sem reviewed) → DISPATCH_REVIEWER."""
+        from flow.domain.gates import WorkItem
+        from flow.domain.state import State
+        from flow.scan.scanner import ScanResult
+
+        return ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/repo/issues/50",
+                title="[owner/repo] Review pendente",
+                labels=frozenset(["crewflow:review", "crewflow:feature"]),
+            ),
+            current_state=State.REVIEW,
+            modifiers=frozenset(),
+            dispatch_candidate=False,
+            spec_valid=None,
+            changed=True,
+            reason="review pendente",
+        )
+
+    def _make_hotfix_rebrand_result(self) -> object:
+        """crewflow:hotfix sem crewflow:p1 → GATE 0 rebaixa para bug (REBRAND)."""
+        from flow.domain.gates import WorkItem
+        from flow.domain.state import State
+        from flow.scan.scanner import ScanResult
+
+        return ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/repo/issues/60",
+                title="[owner/repo] Hotfix duvidoso",
+                labels=frozenset(["crewflow:todo", "crewflow:hotfix"]),
+            ),
+            current_state=State.TODO,
+            modifiers=frozenset(),
+            dispatch_candidate=True,
+            spec_valid=None,
+            changed=True,
+            reason="hotfix",
+        )
+
+    def _run_with(self, ctx: mock.MagicMock, cfg: dict, results: list,
+                  provider: mock.MagicMock | None = None) -> None:
+        prov = provider or mock.MagicMock()
+        if provider is None:
+            prov.get_state_comment.return_value = None
+        with (
+            mock.patch("deployment.deployment._load_config", return_value=cfg),
+            mock.patch("deployment.deployment.scan_candidates", return_value=results),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for", return_value=prov),
+            mock.patch("deployment.deployment._dispatch") as self._mock_disp,
+            mock.patch("deployment.deployment._dispatch_reviewer") as self._mock_disp_rev,
+            mock.patch("deployment.deployment._execute_auto_merges") as self._mock_merge,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            run(ctx)
+
+    def test_dry_run_via_cfg_nao_despacha_nem_notifica(self) -> None:
+        """cfg dry_run=True: _dispatch não é chamado e ctx.notify não é chamado."""
+        ctx = self._make_ctx()
+        self._run_with(ctx, self._dry_config(dry=True, auto=True), [_make_scan_result()])
+
+        self._mock_disp.assert_not_called()
+        ctx.notify.assert_not_called()
+
+    def test_dry_run_via_env_nao_despacha_nem_notifica(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """env CREWFLOW_DRY_RUN=1 sem cfg dry_run: mesmo comportamento no-dispatch."""
+        monkeypatch.setenv("CREWFLOW_DRY_RUN", "1")
+        ctx = self._make_ctx()
+        self._run_with(ctx, self._dry_config(dry=False, auto=True), [_make_scan_result()])
+
+        self._mock_disp.assert_not_called()
+        ctx.notify.assert_not_called()
+
+    def test_env_zero_nao_suprime_caminho_normal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CREWFLOW_DRY_RUN=0 sem cfg dry_run: caminho normal roda (notify na Fase 1)."""
+        monkeypatch.setenv("CREWFLOW_DRY_RUN", "0")
+        ctx = self._make_ctx()
+        # Fase 1 (auto=false): ctx.notify ainda é chamado.
+        self._run_with(ctx, self._dry_config(dry=False, auto=False), [_make_scan_result()])
+
+        ctx.notify.assert_called_once()
+        self._mock_disp.assert_not_called()  # Fase 1 nunca despacha
+
+    def test_env_ausente_nao_suprime_caminho_normal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sem env e sem cfg dry_run: caminho normal (notify na Fase 1)."""
+        monkeypatch.delenv("CREWFLOW_DRY_RUN", raising=False)
+        ctx = self._make_ctx()
+        self._run_with(ctx, self._dry_config(dry=False, auto=False), [_make_scan_result()])
+
+        ctx.notify.assert_called_once()
+
+    def test_dry_run_nao_altera_label_no_rebrand(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Em dry-run, provider.set_labels NÃO é chamado para um REBRAND."""
+        monkeypatch.delenv("CREWFLOW_DRY_RUN", raising=False)
+        ctx = self._make_ctx()
+        prov = mock.MagicMock()
+        prov.get_state_comment.return_value = None
+        self._run_with(
+            ctx, self._dry_config(dry=True, auto=True),
+            [self._make_hotfix_rebrand_result()], provider=prov,
+        )
+
+        prov.set_labels.assert_not_called()
+        ctx.notify.assert_not_called()
+
+    def test_dry_run_nao_despacha_reviewer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Em dry-run, _dispatch_reviewer NÃO é chamado para um caso de review."""
+        monkeypatch.delenv("CREWFLOW_DRY_RUN", raising=False)
+        ctx = self._make_ctx()
+        self._run_with(
+            ctx, self._dry_config(dry=True, auto=True), [self._make_review_result()],
+        )
+
+        self._mock_disp_rev.assert_not_called()
+        self._mock_merge.assert_not_called()
+        ctx.notify.assert_not_called()
+
+    def test_dry_run_loga_linha_dispatch_dev(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """caplog captura uma linha [DRY-RUN] ... DISPATCH_DEV (template: ...)."""
+        import logging
+        monkeypatch.delenv("CREWFLOW_DRY_RUN", raising=False)
+        caplog.set_level(logging.INFO)
+        ctx = self._make_ctx()
+        self._run_with(ctx, self._dry_config(dry=True, auto=True), [_make_scan_result()])
+
+        dry_lines = [r.getMessage() for r in caplog.records if "[DRY-RUN]" in r.getMessage()]
+        assert any(
+            "DISPATCH_DEV" in line and "template:" in line
+            for line in dry_lines
+        ), f"Esperava linha [DRY-RUN] DISPATCH_DEV com template, got: {dry_lines}"
+        # A seta unicode → deve estar presente no formato do issue #73.
+        assert any("\u2192" in line for line in dry_lines)

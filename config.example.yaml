@@ -16,6 +16,17 @@ notify_chat_id: "<SEU_CHAT_ID>"
 #   true  = dispara uma sessão one-shot que implementa, abre o PR e encerra
 auto_dispatch: false
 
+# Dry-run (inspeção sem efeitos colaterais):
+#   false = comportamento normal (default)
+#   true  = o scan e o executor rodam normalmente (issues lidas, decisões
+#           computadas), mas NENHUMA sessão é despachada, NENHUMA label é
+#           alterada e NENHUMA notificação é enviada. Cada decisão é apenas
+#           impressa como uma linha `[DRY-RUN] ...` no log.
+# Alternativa via ambiente (tem o mesmo efeito, sem editar este arquivo):
+#   CREWFLOW_DRY_RUN=1 python3 deployment/deployment.py
+# (a env var só ativa quando definida e diferente de "", "0", "false")
+# dry_run: false
+
 # ── Configuração de squad (opcional mas recomendado) ──────────────────────
 # Caminho para um arquivo squads/*.yaml. Se fornecido, a squad config é
 # carregada dele (routing declarativo, workflow_params, etc.). Caso contrário,

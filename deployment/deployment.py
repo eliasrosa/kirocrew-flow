@@ -282,6 +282,18 @@ def _scan_result_to_issue(result: object) -> dict:
 
 def run(ctx: object) -> None:
     cfg = _load_config()
+
+    # ── Dry-run ────────────────────────────────────────────────────────────
+    # Precedência: cfg["dry_run"] truthy OU env CREWFLOW_DRY_RUN definido e
+    # "ligado". Uma env var ausente ou explicitamente desligada ("", "0",
+    # "false", "False") NÃO ativa o dry-run — comporta-se normalmente.
+    # Quando ativo, o scan e o executor rodam normalmente (issues lidas,
+    # decisões computadas), mas NENHUM efeito colateral dispara: sem dispatch,
+    # sem troca de label, sem notify, sem lock de sessão. Cada decisão é apenas
+    # impressa como uma linha `logger.info("[DRY-RUN] ...")`.
+    _env_dry = os.environ.get("CREWFLOW_DRY_RUN", "").strip()
+    dry_run = bool(cfg.get("dry_run")) or _env_dry not in ("", "0", "false", "False")
+
     repos: list[str] = cfg.get("repos") or []
     auto = bool(cfg.get("auto_dispatch", False))
     max_conc = int(cfg.get("max_concurrent", 2))
@@ -380,11 +392,21 @@ def run(ctx: object) -> None:
     blocked_bypass: list[ScanResult] = []                # result com bypass sem justif
     rebranded: list[tuple[ScanResult, object]] = []      # (result, decision)
     merge_prs: list[tuple[str, dict]] = []               # (repo, issue) — merge squash automático
+    # Linhas [DRY-RUN] coletadas na ordem de scan quando dry_run está ativo.
+    dry_run_lines: list[str] = []
+
+    def _repo_of(res: ScanResult) -> str:
+        return res.item.key.split("/issues/")[0].replace("https://github.com/", "")
 
     for result in scan_results:
         # Flags do scan que não precisam do executor
         if result.spec_valid is False:
             spec_invalid.append(result)
+            if dry_run:
+                dry_run_lines.append(
+                    f"[DRY-RUN] nenhuma ação para: #{_scan_result_to_issue(result)['number']} "
+                    "(SPEC inválida)"
+                )
             continue
 
         # Passa pelo executor para decisão completa
@@ -421,28 +443,65 @@ def run(ctx: object) -> None:
             decision.action,
         )
 
+        number = _scan_result_to_issue(result)["number"]
+
         if decision.action is ActionKind.SKIP:
+            if dry_run:
+                dry_run_lines.append(f"[DRY-RUN] nenhuma ação para: #{number} (SKIP)")
             continue
         if decision.action is ActionKind.BLOCK:
             blocked_bypass.append(result)
+            if dry_run:
+                dry_run_lines.append(
+                    f"[DRY-RUN] {_repo_of(result)}#{number} \u2192 BLOCK ({decision.reason})"
+                )
         elif decision.action is ActionKind.REBRAND:
             rebranded.append((result, decision))
+            if dry_run:
+                dry_run_lines.append(
+                    f"[DRY-RUN] {_repo_of(result)}#{number} \u2192 REBRAND ({decision.reason})"
+                )
         elif decision.action is ActionKind.NOTIFY_HUMAN:
             needs_human.append((result, decision, state_comment))
+            if dry_run:
+                role = decision.notify_role.value.upper() if decision.notify_role else "?"
+                dry_run_lines.append(
+                    f"[DRY-RUN] {_repo_of(result)}#{number} \u2192 "
+                    f"NOTIFY_HUMAN {role} ({decision.reason})"
+                )
         elif decision.action is ActionKind.DISPATCH_REVIEWER:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             issue = _scan_result_to_issue(result)
             dispatch_reviewers.append((repo, issue))
+            if dry_run:
+                dry_run_lines.append(
+                    f"[DRY-RUN] {repo}#{number} \u2192 DISPATCH_REVIEWER ({decision.reason})"
+                )
         elif decision.action is ActionKind.MERGE_PR:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             issue = _scan_result_to_issue(result)
             merge_prs.append((repo, issue))
+            if dry_run:
+                dry_run_lines.append(
+                    f"[DRY-RUN] {repo}#{number} \u2192 MERGE_PR ({decision.reason})"
+                )
         elif decision.action is ActionKind.DISPATCH_DEV:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             if not repo:
                 repo = repos[0] if repos else ""
             issue = _scan_result_to_issue(result)
             dispatch_devs.append((repo, issue, decision))
+            if dry_run:
+                dry_run_lines.append(
+                    f"[DRY-RUN] {repo}#{number} \u2192 DISPATCH_DEV (template: {template})"
+                )
+
+    # ── Dry-run: imprime as decisões e RETORNA antes de qualquer efeito ────
+    # colateral (dispatch, set_labels, notify, merge, lock de sessão).
+    if dry_run:
+        for line in dry_run_lines:
+            logger.info(line)
+        return
 
     # Sem nada a fazer?
     if not any([spec_invalid, dispatch_devs, dispatch_reviewers,

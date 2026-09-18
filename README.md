@@ -126,6 +126,25 @@ routing:
 
 Deixe `auto_dispatch: false` (só avisa). Quando confiar, mude para `true`.
 
+### Dry-run (inspecionar sem efeitos colaterais)
+
+Para ver o que o motor faria sem despachar sessão, alterar label ou notificar,
+ative o dry-run — via `dry_run: true` no `deployment.config.yaml` ou pela env var
+`CREWFLOW_DRY_RUN=1`. O scan e o executor rodam normalmente e cada decisão é
+impressa como uma linha `[DRY-RUN] ...`:
+
+```bash
+CREWFLOW_DRY_RUN=1 python3 deployment/deployment.py
+```
+
+```
+[DRY-RUN] owner/repo#73 → DISPATCH_DEV (template: feature)
+[DRY-RUN] owner/repo#74 → NOTIFY_HUMAN TL (aguarda gate-tl)
+[DRY-RUN] nenhuma ação para: #75 (SKIP)
+```
+
+A env var só ativa quando definida e diferente de `""`, `0` ou `false`.
+
 ## Estrutura do código
 
 ```
