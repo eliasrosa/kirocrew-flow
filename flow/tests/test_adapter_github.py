@@ -309,6 +309,88 @@ class TestUpsertStateComment:
         assert sorted(deleted_ids) == [20, 30]
 
 
+class TestUpsertIssueReviewResult:
+    """Upsert idempotente do resultado COMPLETO do review no lado da issue."""
+
+    MARKER = "<!-- KIRO-FLOW-ISSUE-REVIEW -->"
+
+    def test_cria_comentario_se_nenhum_existe(self) -> None:
+        with mock.patch.object(github_transport, "get_issue_comments", return_value=[]), \
+             mock.patch.object(github_transport, "create_issue_comment") as create_m:
+            github_client.upsert_issue_review_result("owner/repo", 1, f"{self.MARKER} body")
+            create_m.assert_called_once_with("owner/repo", 1, f"{self.MARKER} body")
+
+    def test_atualiza_comentario_existente(self) -> None:
+        existing = [{"id": 777, "body": f"{self.MARKER} old"}]
+        with mock.patch.object(github_transport, "get_issue_comments", return_value=existing), \
+             mock.patch.object(github_transport, "update_issue_comment") as update_m:
+            github_client.upsert_issue_review_result("owner/repo", 1, f"{self.MARKER} novo")
+            update_m.assert_called_once_with("owner/repo", 777, f"{self.MARKER} novo")
+
+    def test_nao_cria_duplicata_se_ja_existe(self) -> None:
+        existing = [{"id": 777, "body": f"{self.MARKER} old"}]
+        with mock.patch.object(github_transport, "get_issue_comments", return_value=existing), \
+             mock.patch.object(github_transport, "create_issue_comment") as create_m, \
+             mock.patch.object(github_transport, "update_issue_comment"):
+            github_client.upsert_issue_review_result("owner/repo", 1, f"{self.MARKER} body")
+            create_m.assert_not_called()
+
+    def test_idempotente_apos_multiplas_chamadas(self) -> None:
+        """N chamadas → exatamente 1 comentário com o marcador (mais recente vence)."""
+        store: list[dict] = []
+        next_id = [500]
+
+        def fake_get_comments(owner_repo: str, number: int) -> list:
+            return list(store)
+
+        def fake_create(owner_repo: str, number: int, body: str) -> dict:
+            cid = next_id[0]
+            next_id[0] += 1
+            store.append({"id": cid, "body": body})
+            return {"id": cid}
+
+        def fake_update(owner_repo: str, comment_id: int, body: str) -> dict:
+            for c in store:
+                if c["id"] == comment_id:
+                    c["body"] = body
+            return {}
+
+        def fake_delete(owner_repo: str, comment_id: int) -> None:
+            store[:] = [c for c in store if c["id"] != comment_id]
+
+        bodies = [f"{self.MARKER}\nresultado {i}" for i in range(3)]
+        with mock.patch.object(github_transport, "get_issue_comments", side_effect=fake_get_comments), \
+             mock.patch.object(github_transport, "create_issue_comment", side_effect=fake_create), \
+             mock.patch.object(github_transport, "update_issue_comment", side_effect=fake_update), \
+             mock.patch.object(github_transport, "delete_issue_comment", side_effect=fake_delete):
+            for body in bodies:
+                github_client.upsert_issue_review_result("owner/repo", 1, body)
+
+        marker_comments = [c for c in store if self.MARKER in c["body"]]
+        assert len(marker_comments) == 1
+        assert marker_comments[0]["body"] == bodies[-1]
+
+    def test_elimina_duplicatas_acumuladas(self) -> None:
+        """Duplicatas de ciclos que usavam append → upsert restaura invariante de 1."""
+        corrupted = [
+            {"id": 10, "body": f"{self.MARKER}\nresultado 0"},
+            {"id": 20, "body": f"{self.MARKER}\nresultado 1"},
+            {"id": 30, "body": f"{self.MARKER}\nresultado 2"},
+        ]
+        deleted_ids: list[int] = []
+
+        def fake_delete(owner_repo: str, comment_id: int) -> None:
+            deleted_ids.append(comment_id)
+
+        with mock.patch.object(github_transport, "get_issue_comments", return_value=corrupted), \
+             mock.patch.object(github_transport, "update_issue_comment") as update_m, \
+             mock.patch.object(github_transport, "delete_issue_comment", side_effect=fake_delete):
+            github_client.upsert_issue_review_result("owner/repo", 1, "novo")
+
+        update_m.assert_called_once_with("owner/repo", 10, "novo")
+        assert sorted(deleted_ids) == [20, 30]
+
+
 class TestGetStateComment:
     def test_retorna_corpo_do_comentario_com_marcador(self) -> None:
         body = f"{norm.STATE_COMMENT_MARKER}\nstatus: running"

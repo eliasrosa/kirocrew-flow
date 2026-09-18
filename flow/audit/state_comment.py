@@ -37,6 +37,11 @@ MARKER_CLOSE = "<!-- /KIRO-FLOW-STATE -->"
 PR_REVIEW_COMMENT_MARKER = "<!-- KIRO-FLOW-REVIEW -->"
 PR_REVIEW_COMMENT_CLOSE  = "<!-- /KIRO-FLOW-REVIEW -->"
 
+# Marcador do comentário de resultado COMPLETO do review no lado da ISSUE.
+# Serve de âncora para upsert (um único comentário por issue), seguindo a mesma
+# convenção de PR_REVIEW_COMMENT_MARKER / STATE_COMMENT_MARKER.
+ISSUE_REVIEW_RESULT_MARKER = "<!-- KIRO-FLOW-ISSUE-REVIEW -->"
+
 
 # ---------------------------------------------------------------------------
 # Modelo
@@ -623,11 +628,17 @@ def render_issue_review_result(
     aceite: "resultado completo postado na PR e na issue"). Mantenha
     ``render_issue_pr_reference()`` apenas para os chamadores de referência curta.
 
+    O corpo começa com ``ISSUE_REVIEW_RESULT_MARKER`` para servir de âncora ao
+    upsert idempotente (``github_client.upsert_issue_review_result``), evitando
+    empilhar comentários duplicados de resultado completo quando a issue é
+    re-processada.
+
     Puro — sem I/O.
     """
     status_str = "✅ Aprovado" if reviewer_result.approved else "⚠️ Pedidos de mudança"
     pr_ref = f"[PR #{pr_number}]({pr_url})" if pr_url else f"PR #{pr_number}"
     lines: list[str] = [
+        ISSUE_REVIEW_RESULT_MARKER,
         "## 🤖 KiroCrew Review — resultado completo",
         "",
         f"**Resultado:** {status_str}",

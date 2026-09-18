@@ -486,10 +486,46 @@ class TestGate2AutoMerge:
             labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
             modifiers={Modifier.REVIEWED},
         )
-        d = decide(r, state_comment=state_comment, pr_ci_green=False)
+        d = decide(
+            r, state_comment=state_comment, pr_ci_green=False, pr_ci_status="red",
+        )
         assert d.action is ActionKind.NOTIFY_HUMAN
         assert d.notify_role is HumanRole.TL
         assert "pipeline" in d.reason.lower()
+        assert "vermelha" in d.reason.lower()
+        # Não deve rotular como pendente quando é de fato vermelha
+        assert "pendente" not in d.reason.lower()
+
+    def test_ci_pendente_bloqueia_merge_mas_rotula_pendente(self) -> None:
+        """Pipeline PENDENTE (em execução) ainda bloqueia o merge, mas a razão
+        distingue 'pendente' de 'vermelha' (não afirma que a pipeline falhou)."""
+        state_comment = self._make_review_result(approved=True, comments=[])
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
+            modifiers={Modifier.REVIEWED},
+        )
+        d = decide(
+            r, state_comment=state_comment, pr_ci_green=False, pr_ci_status="pending",
+        )
+        # Segurança preservada: pendente NÃO mergeia.
+        assert d.action is ActionKind.NOTIFY_HUMAN
+        assert d.notify_role is HumanRole.TL
+        assert "pipeline" in d.reason.lower()
+        # Rotulagem correta: diz "pendente", não "vermelha".
+        assert "pendente" in d.reason.lower()
+        assert "vermelha" not in d.reason.lower()
+
+    def test_ci_vermelha_sem_status_mantem_rotulo_vermelha(self) -> None:
+        """Compat: pr_ci_green=False sem pr_ci_status → rótulo default 'vermelha'."""
+        state_comment = self._make_review_result(approved=True, comments=[])
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
+            modifiers={Modifier.REVIEWED},
+        )
+        d = decide(r, state_comment=state_comment, pr_ci_green=False)
+        assert d.action is ActionKind.NOTIFY_HUMAN
         assert "vermelha" in d.reason.lower()
 
     def test_ci_verde_prossegue_merge(self) -> None:

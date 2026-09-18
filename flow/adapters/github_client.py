@@ -18,7 +18,10 @@ from __future__ import annotations
 
 from flow.adapters import github_normalization as norm
 from flow.adapters import github_transport as transport
-from flow.audit.state_comment import PR_REVIEW_COMMENT_MARKER
+from flow.audit.state_comment import (
+    ISSUE_REVIEW_RESULT_MARKER,
+    PR_REVIEW_COMMENT_MARKER,
+)
 from flow.ports.issue_provider import ProviderNotFoundError
 
 
@@ -202,3 +205,27 @@ def add_issue_comment(project: str, issue_number: int, body: str) -> dict:
     """Adiciona um comentário a uma issue."""
     from flow.adapters import github_transport as _t
     return _t.create_issue_comment(project, issue_number, body)
+
+
+def upsert_issue_review_result(project: str, issue_number: int, body: str) -> None:
+    """Cria ou atualiza o comentário de resultado COMPLETO do review na ISSUE.
+
+    Segue o mesmo padrão idempotente de ``upsert_state_comment`` /
+    ``upsert_pr_review_comment``: ancora no ``ISSUE_REVIEW_RESULT_MARKER`` e
+    garante um único comentário de resultado completo por issue, evitando que
+    re-processamentos empilhem duplicatas (0 → cria; 1 → atualiza in-place;
+    N > 1 → atualiza o primeiro e remove os excedentes).
+    """
+    comments = transport.get_issue_comments(project, issue_number)
+    marker_comments = [
+        c for c in comments
+        if ISSUE_REVIEW_RESULT_MARKER in c.get("body", "")
+    ]
+
+    if not marker_comments:
+        transport.create_issue_comment(project, issue_number, body)
+        return
+
+    transport.update_issue_comment(project, marker_comments[0]["id"], body)
+    for duplicate in marker_comments[1:]:
+        transport.delete_issue_comment(project, duplicate["id"])

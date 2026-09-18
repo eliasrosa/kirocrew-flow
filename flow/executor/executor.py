@@ -119,6 +119,7 @@ def decide(
     pr_head_sha: str | None = None,
     max_review_iterations: int | None = None,
     pr_ci_green: bool | None = None,
+    pr_ci_status: str | None = None,
 ) -> ExecutorDecision:
     """Decide o que fazer com a issue.
 
@@ -140,9 +141,17 @@ def decide(
                                False=vermelho/pendente, None=desconhecido.
                                Injetado pelo driving adapter (sem I/O aqui,
                                espelhando ``pr_head_sha``). No gate único de
-                               review, uma pipeline vermelha (``False``) impede o
-                               MERGE_PR mesmo que o ReviewerResult diga aprovado.
-                               ``None`` preserva o comportamento atual.
+                               review, uma pipeline vermelha OU pendente
+                               (``False``) impede o MERGE_PR mesmo que o
+                               ReviewerResult diga aprovado. ``None`` preserva o
+                               comportamento atual.
+        pr_ci_status:          Rótulo tri-estado bruto da pipeline injetado
+                               junto com ``pr_ci_green`` para que a mensagem
+                               humana distinga "pendente" de "vermelha" sem
+                               enfraquecer o bloqueio (ambos bloqueiam). Valores:
+                               'green' | 'red' | 'pending' | 'none' | None. É
+                               apenas rotulagem — o bloqueio continua governado
+                               por ``pr_ci_green is False``.
 
     Returns:
         ExecutorDecision com a ação e os metadados para o executor de I/O.
@@ -269,15 +278,32 @@ def decide(
             )
 
         if reviewer_result.is_auto_mergeable:
+            # Assimetria intencional (nesta iteração): o CI ganha uma
+            # re-verificação AO VIVO no momento da decisão via pr_ci_green
+            # injetado, mas os comentários pendentes (unresolved_comments) são
+            # confiados apenas ao ReviewerResult armazenado — não há re-fetch de
+            # threads da PR aqui. É aceitável porque o reviewer é a fonte
+            # autoritativa da resolução de comentários e um re-fetch ao vivo
+            # ampliaria o escopo (I/O extra + parsing de threads) sem ganho de
+            # segurança comparável ao do CI, que pode ficar vermelho DEPOIS do
+            # review. Se um dia o reviewer sub-reportar threads abertas, a
+            # correção é reforçar o próprio reviewer, não adicionar I/O aqui.
+            #
             # Gate único de review: a pipeline TEM que estar verde antes do merge.
             # pr_ci_green é injetado pelo driving adapter (sem I/O aqui).
-            # False = pipeline vermelha/pendente → NÃO mergeia, escala pro TL.
+            # False = pipeline vermelha OU pendente → NÃO mergeia, escala pro TL.
             # None = desconhecido → não bloqueia (preserva comportamento legado/Jira).
+            # pr_ci_status apenas rotula o motivo (pendente vs vermelha); o
+            # bloqueio em si continua governado por pr_ci_green is False.
             if pr_ci_green is False:
+                if pr_ci_status == "pending":
+                    ci_phrase = "a pipeline (CI) ainda está pendente (em execução)"
+                else:
+                    ci_phrase = "a pipeline (CI) está vermelha"
                 return ExecutorDecision(
                     action=ActionKind.NOTIFY_HUMAN,
                     reason=(
-                        "reviewer aprovou mas a pipeline (CI) está vermelha — "
+                        f"reviewer aprovou mas {ci_phrase} — "
                         "merge automático bloqueado, TL deve investigar"
                     ),
                     notify_role=HumanRole.TL,

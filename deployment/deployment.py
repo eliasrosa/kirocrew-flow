@@ -710,6 +710,7 @@ def run(ctx: object) -> None:
         # Consulta também o estado da pipeline (CI) para o gate único de review.
         pr_head_sha: str | None = None
         pr_ci_green: bool | None = None
+        pr_ci_status: str | None = None
         if result.current_state is State.REVIEW and Modifier.REVIEWED in result.modifiers:
             import contextlib
             with contextlib.suppress(Exception):
@@ -722,11 +723,12 @@ def run(ctx: object) -> None:
                     _pr = provider.get_pr_for_issue(_repo, _issue_number)
                     if _pr:
                         pr_head_sha = _pr.get("headRefOid") or _pr.get("headRefName")
-                        pr_ci_green = _check_pr_ci(_repo, int(_pr["number"]))
+                        pr_ci_green, pr_ci_status = _check_pr_ci(_repo, int(_pr["number"]))
 
         decision = decide(
             result, state_comment=state_comment, squad=squad,
             pr_head_sha=pr_head_sha, pr_ci_green=pr_ci_green,
+            pr_ci_status=pr_ci_status,
         )
 
         # Loga o template resolvido pelo executor e a ação decidida, para
@@ -1515,17 +1517,25 @@ def _dispatch_reviewer(
         )
 
 
-def _check_pr_ci(repo: str, pr_number: int) -> bool | None:
+def _check_pr_ci(repo: str, pr_number: int) -> tuple[bool | None, str | None]:
     """Consulta o estado da pipeline (CI) do PR para o gate único de review.
 
-    Driving-adapter helper: chama ``github_client.get_pr_ci_status`` e reduz o
-    rótulo a um ``bool | None`` que o ``decide()`` injeta como ``pr_ci_green``:
+    Driving-adapter helper: chama ``github_client.get_pr_ci_status`` e devolve
+    uma tupla ``(gate, status)`` que o ``decide()`` injeta como
+    ``pr_ci_green`` e ``pr_ci_status`` respectivamente:
 
-      - 'green'          → True  (pipeline verde, pode mergear)
-      - 'red' / 'pending'→ False (bloqueia o merge automático — distingue no log)
-      - 'none' / erro    → None  (desconhecido, não bloqueia — legado/sem CI)
+      - 'green'          → (True,  'green')   (pipeline verde, pode mergear)
+      - 'red'            → (False, 'red')     (bloqueia o merge automático)
+      - 'pending'        → (False, 'pending') (bloqueia — mas rotulado como pendente)
+      - 'none' / erro    → (None,  <status|None>)  (desconhecido, não bloqueia)
 
-    Nunca propaga exceção: falha de I/O degrada para ``None`` (não bloqueia).
+    O ``gate`` (primeiro elemento) preserva a semântica de bloqueio anterior:
+    tanto ``red`` quanto ``pending`` mapeiam para ``False`` (ambos bloqueiam o
+    auto-merge por segurança). O ``status`` (segundo elemento) carrega o rótulo
+    bruto para que a mensagem humana em ``decide()`` distinga "pendente" de
+    "vermelha" sem enfraquecer o bloqueio.
+
+    Nunca propaga exceção: falha de I/O degrada para ``(None, None)`` (não bloqueia).
     """
     from flow.adapters import github_client as gh_client
     from flow.ports.issue_provider import ProviderError
@@ -1537,24 +1547,24 @@ def _check_pr_ci(repo: str, pr_number: int) -> bool | None:
             "deployment: _check_pr_ci: falha ao consultar CI de %s PR#%s: %s — tratando como desconhecido",
             repo, pr_number, exc,
         )
-        return None
+        return None, None
     except Exception as exc:
         logger.warning(
             "deployment: _check_pr_ci: erro inesperado ao consultar CI de %s PR#%s: %s",
             repo, pr_number, exc,
         )
-        return None
+        return None, None
 
     if status == "green":
-        return True
+        return True, "green"
     if status in ("red", "pending"):
         logger.info(
             "deployment: _check_pr_ci: pipeline de %s PR#%s = %s — merge automático bloqueado",
             repo, pr_number, status,
         )
-        return False
+        return False, status
     # 'none' ou desconhecido → sem informação de CI, não bloqueia
-    return None
+    return None, status
 
 
 def _post_reviewer_result_on_pr(
@@ -1628,10 +1638,9 @@ def _update_issue_with_pr_ref(
     import contextlib
 
     from flow.adapters import github_client as gh_client
-    from flow.audit.state_comment import ReviewerResult
+    from flow.audit.state_comment import ReviewerResult, render_issue_review_result
     from flow.audit.state_comment import parse as _parse
     from flow.audit.state_comment import render as _render
-    from flow.audit.state_comment import render_issue_review_result
 
     rr: ReviewerResult = reviewer_result  # type: ignore[assignment]
     pr_url = f"https://github.com/{repo}/pull/{pr_number}"
@@ -1650,10 +1659,12 @@ def _update_issue_with_pr_ref(
             with contextlib.suppress(Exception):
                 gh_client.upsert_state_comment(repo, str(issue_number), _render(sc))
 
-    # Resultado COMPLETO na issue (o que foi feito + link + status + CI + comentários)
+    # Resultado COMPLETO na issue (o que foi feito + link + status + CI + comentários).
+    # Upsert idempotente (ancorado em ISSUE_REVIEW_RESULT_MARKER): re-processar a
+    # mesma issue atualiza o comentário in-place em vez de empilhar duplicatas.
     full_result = render_issue_review_result(rr, pr_number, pr_url)
     with contextlib.suppress(Exception):
-        gh_client.add_issue_comment(repo, issue_number, full_result)
+        gh_client.upsert_issue_review_result(repo, issue_number, full_result)
 
 
 def _notify_reviewers(ctx: object, items: list, chat_id: str) -> None:
@@ -1957,6 +1968,7 @@ def _run_stage(ctx: object, stage: str) -> None:
 
         pr_head_sha: str | None = None
         pr_ci_green: bool | None = None
+        pr_ci_status: str | None = None
         if result.current_state is State.REVIEW and Modifier.REVIEWED in result.modifiers:
             import contextlib
             with contextlib.suppress(Exception):
@@ -1969,11 +1981,12 @@ def _run_stage(ctx: object, stage: str) -> None:
                     _pr = provider.get_pr_for_issue(_repo, _issue_number)
                     if _pr:
                         pr_head_sha = _pr.get("headRefOid") or _pr.get("headRefName")
-                        pr_ci_green = _check_pr_ci(_repo, int(_pr["number"]))
+                        pr_ci_green, pr_ci_status = _check_pr_ci(_repo, int(_pr["number"]))
 
         decision = decide(
             result, state_comment=state_comment, squad=squad,
             pr_head_sha=pr_head_sha, pr_ci_green=pr_ci_green,
+            pr_ci_status=pr_ci_status,
         )
 
         template = resolve_template(result, squad)

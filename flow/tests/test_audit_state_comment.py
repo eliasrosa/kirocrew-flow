@@ -437,6 +437,8 @@ class TestRenderIssueReviewResult:
         assert "**Pipeline (CI):** verde" in body
         assert "[PR #74](https://github.com/o/r/pull/74)" in body
         assert "`abc123`" in body
+        # Marcador de âncora para o upsert idempotente do lado da issue
+        assert "<!-- KIRO-FLOW-ISSUE-REVIEW -->" in body
 
     def test_resultado_completo_com_mudancas_e_pendentes(self) -> None:
         from flow.audit.state_comment import ReviewerResult, render_issue_review_result

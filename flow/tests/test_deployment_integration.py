@@ -490,6 +490,81 @@ class TestCiGateBlocksAutoMerge:
 
         mock_merge.assert_called_once()
 
+    def test_ci_pendente_nao_mergeia_e_upserta_resultado_na_issue(self) -> None:
+        """Pipeline PENDENTE bloqueia o merge, posta o resultado completo no PR
+        e faz UPSERT (não append) do resultado completo na issue."""
+        from flow.audit.state_comment import StateComment, render
+        from flow.domain.gates import WorkItem
+        from flow.domain.state import Modifier, State
+        from flow.scan.scanner import ScanResult
+
+        ctx = self._make_ctx()
+
+        sc = StateComment(
+            workflow="feature (v1)", current_node="review",
+            status="reviewed", repo="owner/repo",
+        )
+        sc.set_reviewer_result(approved=True, comments=[], sha="abc123")
+        state_body = render(sc)
+
+        result = ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/repo/issues/42",
+                title="[owner/repo] Feature X",
+                labels=frozenset(["crewflow:review", "crewflow:reviewed", "crewflow:feature"]),
+            ),
+            current_state=State.REVIEW,
+            modifiers=frozenset([Modifier.REVIEWED]),
+            dispatch_candidate=False,
+            spec_valid=None,
+            changed=True,
+            reason="reviewer aprovado",
+        )
+
+        fake_pr = {"number": 99, "title": "feat: X", "headRefName": "feat/issue-42",
+                   "headRefOid": "abc123", "body": "Closes #42"}
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_minimal_config(auto=True)),
+            mock.patch("deployment.deployment.scan_candidates",
+                       return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_provider_for,
+            mock.patch("flow.adapters.github_client.get_pr_ci_status",
+                       return_value="pending") as mock_ci,
+            mock.patch("flow.adapters.github_client.get_pr_for_issue",
+                       return_value=fake_pr),
+            mock.patch("flow.adapters.github_client.merge_pull_request") as mock_merge,
+            mock.patch("flow.adapters.github_client.upsert_pr_review_comment") as mock_pr_post,
+            mock.patch("flow.adapters.github_client.get_state_comment", return_value=state_body),
+            mock.patch("flow.adapters.github_client.upsert_state_comment"),
+            mock.patch("flow.adapters.github_client.add_issue_comment") as mock_append,
+            mock.patch("flow.adapters.github_client.upsert_issue_review_result") as mock_issue_upsert,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_state_comment = mock.MagicMock(return_value=state_body)
+            mock_provider.get_pr_for_issue = mock.MagicMock(return_value=fake_pr)
+            mock_provider_for.return_value = mock_provider
+
+            run(ctx)
+
+        # CI consultada, pendente NÃO mergeia (segurança preservada)
+        assert mock_ci.called
+        mock_merge.assert_not_called()
+        # Resultado completo postado no PR
+        assert mock_pr_post.called
+        # Resultado completo na issue vai por UPSERT (idempotente), não por append
+        assert mock_issue_upsert.called
+        mock_append.assert_not_called()
+        # O corpo upsertado carrega o marcador de âncora do upsert
+        from flow.audit.state_comment import ISSUE_REVIEW_RESULT_MARKER
+        posted_body = mock_issue_upsert.call_args.args[2]
+        assert ISSUE_REVIEW_RESULT_MARKER in posted_body
+
 
 # ---------------------------------------------------------------------------
 # Fix 1 — _repo_has_active / _active_sessions com detecção de locks obsoletos
