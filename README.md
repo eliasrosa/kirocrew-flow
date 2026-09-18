@@ -67,13 +67,16 @@ que lhe pertencem.
 
 | Cron | Entrypoint | Estado observado | Ação |
 |---|---|---|---|
-| `crewflow-dev` | `deployment.py:run_dev` | `crewflow:todo` | dispatch dev / re-trabalho (modelo forte) |
+| `crewflow-dev` | `deployment.py:run_dev` | `crewflow:todo` (+ `crewflow:spec`/`crewflow:ready`/`crewflow:qa` p/ avisos) | dispatch dev / re-trabalho (modelo forte) |
 | `crewflow-reviewer` | `deployment.py:run_reviewer` | `crewflow:review` | dispatch reviewer (modelo mais leve/rápido) |
 | `crewflow-merge` | `deployment.py:run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | merge squash + labels |
 | `crewflow-conflito` | `deployment.py:run_conflito` | PRs com `crewflow:conflito` | roteia/notifica (resolução é BO #4, futuro) |
 
 O cron `crewflow-dev` também é o dono das ações informativas que nascem do scan de
-`todo`/`spec`: spec inválida, bypass bloqueado, rebrand e notificações de humano.
+`todo`/`spec`: spec inválida, bypass bloqueado, rebrand e notificações de humano. Por
+isso ele varre não só `crewflow:todo` mas também `crewflow:spec`/`crewflow:ready`/`crewflow:qa`:
+esses estados geram `NOTIFY_HUMAN` (aprovação do TL, priorização, validação em HML) e,
+sem o cron dev varrê-los, uma implantação 100% por estágio deixaria de emitir esses avisos.
 
 Ganhos da separação:
 

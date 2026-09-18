@@ -116,7 +116,7 @@ observadora do estado). O `deployment.py` expõe um entrypoint por estágio; o
 
 | Cron | Entrypoint | Estado observado | Ação |
 |---|---|---|---|
-| `crewflow-dev` | `run_dev` | `crewflow:todo` | dispatch dev / re-trabalho + ações informativas (spec inválida, bypass bloqueado, rebrand, notify_human) |
+| `crewflow-dev` | `run_dev` | `crewflow:todo` (+ `crewflow:spec`/`crewflow:ready`/`crewflow:qa` para os avisos) | dispatch dev / re-trabalho + ações informativas (spec inválida, bypass bloqueado, rebrand, notify_human de SPEC/READY/QA) |
 | `crewflow-reviewer` | `run_reviewer` | `crewflow:review` | dispatch reviewer |
 | `crewflow-merge` | `run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | merge squash + labels (fluxo já existente) |
 | `crewflow-conflito` | `run_conflito` | PRs com `crewflow:conflito` | apenas roteia/notifica |
@@ -124,7 +124,9 @@ observadora do estado). O `deployment.py` expõe um entrypoint por estágio; o
 Cada cron:
 
 - **Escopa o scan aos estados do seu estágio** — o scan zero-token é preservado por
-  estágio (o cron dev só varre `crewflow:todo`; reviewer/merge/conflito só `crewflow:review`).
+  estágio (o cron dev varre `crewflow:todo` e também `crewflow:spec`/`crewflow:ready`/`crewflow:qa`,
+  cujos `NOTIFY_HUMAN` ele é o dono, para que os avisos ao TL/QA continuem saindo em
+  modo 100% por estágio; reviewer/merge/conflito só `crewflow:review`).
 - **Executa só as ações que lhe pertencem** — as demais categorias são ignoradas
   (roteamento isolado); a decisão continua vindo do mesmo `executor.decide()`.
 - **Aceita modelo próprio via config** (`stages.<stage>.model`) — threaded na chave

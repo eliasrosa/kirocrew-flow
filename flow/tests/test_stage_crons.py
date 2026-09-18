@@ -16,7 +16,11 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest import mock
+
+if TYPE_CHECKING:
+    from flow.domain.state import State
 
 _REPO_ROOT = str(Path(__file__).parent.parent.parent)
 if _REPO_ROOT not in sys.path:
@@ -116,6 +120,42 @@ def _reviewed_result(key: str = "https://github.com/owner/repo/issues/44") -> tu
     return result, body
 
 
+def _notify_result(
+    state: State,
+    label: str,
+    key: str,
+) -> object:
+    """ScanResult num estado que o executor mapeia para NOTIFY_HUMAN
+    (SPEC → TL, READY → TL, QA → QA)."""
+    from flow.domain.gates import WorkItem
+    from flow.scan.scanner import ScanResult
+
+    return ScanResult(
+        item=WorkItem(key=key, title="[owner/repo] Notify", labels=frozenset([label, "crewflow:feature"])),
+        current_state=state,
+        modifiers=frozenset(),
+        dispatch_candidate=False,
+        spec_valid=None,
+        changed=True,
+        reason="notify pendente",
+    )
+
+
+def _spec_result(key: str = "https://github.com/owner/repo/issues/46") -> object:
+    from flow.domain.state import State
+    return _notify_result(State.SPEC, "crewflow:spec", key)
+
+
+def _ready_result(key: str = "https://github.com/owner/repo/issues/47") -> object:
+    from flow.domain.state import State
+    return _notify_result(State.READY, "crewflow:ready", key)
+
+
+def _qa_result(key: str = "https://github.com/owner/repo/issues/48") -> object:
+    from flow.domain.state import State
+    return _notify_result(State.QA, "crewflow:qa", key)
+
+
 def _conflito_result(key: str = "https://github.com/owner/repo/issues/45") -> object:
     from flow.domain.gates import WorkItem
     from flow.domain.state import State
@@ -190,13 +230,43 @@ class TestRunDev:
         m["execute_auto_merges"].assert_not_called()
         m["route_conflito"].assert_not_called()
 
-    def test_scan_escopado_ao_estado_todo(self) -> None:
-        """run_dev escopa o scan a State.TODO (zero-token do estágio)."""
+    def test_scan_escopado_aos_estados_do_dev(self) -> None:
+        """run_dev escopa o scan aos estados de que é dono: TODO + SPEC/READY/QA.
+
+        SPEC/READY/QA geram NOTIFY_HUMAN no executor e eram varridos pelo
+        monolito; o cron dev (dono de needs_human) precisa varrê-los para não
+        haver regressão silenciosa de notificações em modo 100% por estágio.
+        """
         with _Patches(_cfg(), [_todo_result()]) as m:
             run_dev(_ctx())
         scan_cfg = m["scan"].call_args[0][0]
         from flow.domain.state import State
-        assert scan_cfg.states == frozenset({State.TODO})
+        assert scan_cfg.states == frozenset(
+            {State.SPEC, State.READY, State.TODO, State.QA}
+        )
+
+    def test_surface_notify_human_de_spec_ready_qa(self) -> None:
+        """run_dev SURFACE as notificações de SPEC/READY/QA (BO #1, issue #1).
+
+        Em modo 100% por estágio, o cron dev é o único que varre SPEC/READY/QA;
+        confirma que os NOTIFY_HUMAN desses estados chegam ao ctx.notify e não
+        são silenciosamente descartados. Falharia se o dev voltasse a varrer só
+        TODO.
+        """
+        results = [_spec_result(), _ready_result(), _qa_result()]
+        ctx = _ctx()
+        with _Patches(_cfg(), results) as m:
+            run_dev(ctx)
+        # As três notificações foram surfadas (TL para spec/ready, QA para qa).
+        assert ctx.notify.called
+        notified = " ".join(str(c.args[0]) for c in ctx.notify.call_args_list)
+        assert "issues/46" in notified  # spec
+        assert "issues/47" in notified  # ready
+        assert "issues/48" in notified  # qa
+        # Nenhum dispatch de implementação/review/merge para itens NOTIFY_HUMAN.
+        m["dispatch"].assert_not_called()
+        m["dispatch_reviewer"].assert_not_called()
+        m["execute_auto_merges"].assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +340,23 @@ class TestRunConflito:
             run_conflito(_ctx())
         m["route_conflito"].assert_not_called()
 
+    def test_reviewer_nao_dispatcha_pr_em_conflito(self) -> None:
+        """Propriedade de segurança: o cron reviewer NÃO dispara reviewer para
+        um PR com crewflow:conflito (item é interceptado e depois zerado, nem
+        despachado nem roteado)."""
+        with _Patches(_cfg(), [_conflito_result()]) as m:
+            run_reviewer(_ctx())
+        m["dispatch_reviewer"].assert_not_called()
+        m["route_conflito"].assert_not_called()
+
+    def test_merge_nao_mergeia_pr_em_conflito(self) -> None:
+        """Propriedade de segurança: o cron merge NÃO mergeia um PR com
+        crewflow:conflito."""
+        with _Patches(_cfg(), [_conflito_result()]) as m:
+            run_merge(_ctx())
+        m["execute_auto_merges"].assert_not_called()
+        m["route_conflito"].assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # (e) modelo por estágio threaded no body do POST /api/chat
@@ -340,20 +427,27 @@ class TestChatBody:
 
 class TestBackwardCompat:
     def test_run_monolitico_processa_todos_os_tipos(self) -> None:
-        """run() (sem estágio) executa dev, reviewer, merge e conflito num ciclo."""
+        """run() (sem estágio) executa dev, reviewer e merge num único ciclo.
+
+        Diferente das crons por estágio, o monolito NÃO intercepta o label
+        crewflow:conflito (issue #2): não usamos um item de conflito aqui — a
+        interceptação monolítica é coberta por
+        ``test_run_monolitico_nao_intercepta_conflito``.
+        """
         reviewed, body = _reviewed_result()
-        results = [_todo_result(), _review_result(), reviewed, _conflito_result()]
+        results = [_todo_result(), _review_result(), reviewed]
         with _Patches(_cfg(), results) as m:
             m["provider"].get_state_comment.return_value = body
             m["provider"].get_pr_for_issue.return_value = {
                 "number": 99, "headRefName": "feat/issue-44", "headRefOid": "abc123",
             }
             run(_ctx())
-        # Comportamento monolítico: TODAS as categorias executam no mesmo ciclo.
+        # Comportamento monolítico: dev + reviewer + merge executam no mesmo ciclo.
         m["dispatch"].assert_called_once()
         m["dispatch_reviewer"].assert_called_once()
         m["execute_auto_merges"].assert_called_once()
-        m["route_conflito"].assert_called_once()
+        # Sem itens de conflito, _route_conflito não é chamado.
+        m["route_conflito"].assert_not_called()
 
     def test_run_monolitico_scan_sem_escopo_de_estados(self) -> None:
         """run() não escopa o scan — states=None (varre todos os estados)."""
@@ -366,6 +460,19 @@ class TestBackwardCompat:
         with _Patches(_cfg(), [_todo_result()]) as m:
             run(_ctx())
         assert m["dispatch"].call_args.kwargs["model"] is None
+
+    def test_run_monolitico_nao_intercepta_conflito(self) -> None:
+        """run() (monolítico) NÃO desvia itens crewflow:conflito para
+        _route_conflito — eles seguem pelo executor como antes desta feature
+        (equivalência byte-for-byte; issue #2). O fixture está em crewflow:review,
+        então o executor decide DISPATCH_REVIEWER.
+        """
+        with _Patches(_cfg(), [_conflito_result()]) as m:
+            run(_ctx())
+        # Interceptação de conflito NÃO ocorre no caminho monolítico.
+        m["route_conflito"].assert_not_called()
+        # O item segue pelo executor: estado REVIEW → dispatch reviewer.
+        m["dispatch_reviewer"].assert_called_once()
 
 
 # ---------------------------------------------------------------------------

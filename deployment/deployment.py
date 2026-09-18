@@ -94,11 +94,20 @@ def _stage_states(stage: str) -> frozenset | None:
     """Retorna os States que o scan de um estágio deve varrer (zero-token).
 
     None (não deveria ocorrer para estágios conhecidos) = varre todos.
+
+    O cron dev é o dono das ações informativas (needs_human/spec_invalid/
+    blocked_bypass/rebrand). Como o executor emite NOTIFY_HUMAN também para
+    SPEC (aprovação do TL), READY (priorização) e QA (validação em HML) — e o
+    monolito varria QA via ALWAYS_INCLUDE_STATES — o cron dev também varre
+    SPEC/READY/QA. Assim, uma implantação 100% por estágio continua
+    surfando essas notificações (nenhuma regressão silenciosa vs. o monolito).
+    Nenhuma dessas gera dispatch de implementação — só NOTIFY_HUMAN — então o
+    dev segue sendo o dono natural delas sem sobreposição com reviewer/merge.
     """
     from flow.domain.state import State
 
     if stage == STAGE_DEV:
-        return frozenset({State.TODO})
+        return frozenset({State.SPEC, State.READY, State.TODO, State.QA})
     if stage in (STAGE_REVIEWER, STAGE_MERGE, STAGE_CONFLITO):
         # reviewer/merge/conflito operam sobre PRs em review
         return frozenset({State.REVIEW})
@@ -468,9 +477,13 @@ def _chat_body(
     afetar testes/usuários existentes. Quando configurado, adiciona a chave
     ``model`` (nome do modelo por estágio, ex.: forte no dev, leve no reviewer).
 
-    A chave JSON é ``model`` — o contrato /api/chat do Kiro Crew não está
-    disponível no sandbox para confirmar outro nome; documentado em
-    config.example.yaml.
+    SUPOSIÇÃO DE CONTRATO: a chave JSON é ``model``. O gateway /api/chat do
+    Kiro Crew NÃO pôde ser consultado no ambiente de build para confirmar o
+    nome exato do campo de seleção de modelo. Se o gateway esperar outro nome
+    (ex.: ``model_id`` / ``reasoning``), altere APENAS a string abaixo — este é
+    o único ponto onde o campo é montado. Com ``model`` omitido na config, a
+    chave não é adicionada e o body fica idêntico ao histórico (risco baixo).
+    Ver a nota correspondente em config.example.yaml (bloco ``stages:``).
     """
     payload: dict = {
         "message": message,
@@ -786,10 +799,22 @@ def _run_stages(ctx: object, stage: str | None = None) -> None:
     # notificamos. Não é uma ActionKind do executor; detectamos pelo label.
     conflito: list[ScanResult] = []                      # PRs com crewflow:conflito
 
+    # A interceptação do label crewflow:conflito ocorre em QUALQUER modo por
+    # estágio (allowed is not None): o item é desviado do executor e coletado na
+    # lista `conflito`. Só o estágio conflito a mantém (via _permitido) e roteia;
+    # nos demais estágios (dev/reviewer/merge) a lista é zerada adiante — o
+    # efeito é uma propriedade de segurança: um PR em conflito nunca é elegível
+    # a merge/reviewer dispatch. No modo MONOLÍTICO (allowed is None), NÃO
+    # interceptamos: o item com crewflow:conflito segue pelo executor exatamente
+    # como antes desta feature, preservando a equivalência byte-for-byte de run()
+    # (issue #2 da review — o label é novo, mas gatear aqui evita qualquer
+    # mudança de comportamento no caminho monolítico).
+    intercept_conflito = allowed is not None
+
     for result in scan_results:
         # Estágio conflito: item carrega o label crewflow:conflito → roteia.
         # Independente da ActionKind do executor (o label é um sinal externo).
-        if LABEL_CONFLITO in result.item.labels:
+        if intercept_conflito and LABEL_CONFLITO in result.item.labels:
             conflito.append(result)
             continue
 

@@ -87,6 +87,13 @@ agent: "kirocrew"
 #   model    — modelo/reasoning enviado no POST /api/chat daquele estágio.
 #              Threaded na chave JSON `model` do body. Omitido = body atual
 #              (sem a chave `model`), preservando o comportamento de sempre.
+#              NOTA (contrato /api/chat): a chave JSON `model` é uma SUPOSIÇÃO.
+#              O gateway do Kiro Crew não pôde ser consultado no ambiente de
+#              build para confirmar o nome exato do campo de seleção de modelo.
+#              Se o seu gateway espera outro nome (ex.: `model_id`, `reasoning`),
+#              ajuste a chave em `_chat_body()` (deployment/deployment.py) — é o
+#              único ponto onde o campo é montado. Com `model` omitido aqui, o
+#              body não inclui a chave e nada quebra, então o risco é baixo.
 #   interval — cadência do scan em segundos (usado pelo install-cron.sh ao
 #              gerar cada cron; ex.: reviewer mais rápido que dev).
 #   log      — caminho do arquivo de log isolado do estágio. Omitido = default
