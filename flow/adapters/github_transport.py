@@ -239,5 +239,4 @@ def delete_branch(owner_repo: str, branch: str) -> None:
     )
     # 404 = branch já deletado ou não existe — não é erro
     if result.returncode != 0 and b"404" not in result.stderr and b"Not Found" not in result.stderr:
-        from flow.ports.issue_provider import ProviderError
         raise ProviderError(f"delete_branch {branch}: {result.stderr.decode()[:200]}")

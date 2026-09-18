@@ -193,6 +193,51 @@ class TestUpsertStateComment:
             github_client.upsert_state_comment("owner/repo", "1", "body")
             create_m.assert_not_called()
 
+    def test_idempotente_apos_multiplas_chamadas(self) -> None:
+        """Após 3 chamadas com corpos diferentes, existe 1 comentário com o marker.
+
+        Modela um store stateful de comentários: create acrescenta um comentário
+        com o marcador; update substitui in-place o corpo do comentário casado.
+        Encoda o critério de aceite da issue #82:
+        `jq '[.comments[] | select(.body | contains("KIRO-FLOW-STATE"))] | length' == 1`.
+        """
+        store: list[dict] = []
+        next_id = [100]
+
+        def fake_get_comments(owner_repo: str, number: int) -> list:
+            return list(store)
+
+        def fake_create(owner_repo: str, number: int, body: str) -> dict:
+            cid = next_id[0]
+            next_id[0] += 1
+            store.append({"id": cid, "body": body})
+            return {"id": cid}
+
+        def fake_update(owner_repo: str, comment_id: int, body: str) -> dict:
+            for c in store:
+                if c["id"] == comment_id:
+                    c["body"] = body
+            return {}
+
+        def fake_delete(owner_repo: str, comment_id: int) -> None:
+            store[:] = [c for c in store if c["id"] != comment_id]
+
+        bodies = [
+            f"{norm.STATE_COMMENT_MARKER}\nstatus: ciclo-{i}\n{norm.STATE_COMMENT_CLOSE}"
+            for i in range(3)
+        ]
+
+        with mock.patch.object(github_transport, "get_issue_comments", side_effect=fake_get_comments), \
+             mock.patch.object(github_transport, "create_issue_comment", side_effect=fake_create), \
+             mock.patch.object(github_transport, "update_issue_comment", side_effect=fake_update), \
+             mock.patch.object(github_transport, "delete_issue_comment", side_effect=fake_delete):
+            for body in bodies:
+                github_client.upsert_state_comment("owner/repo", "1", body)
+
+        marker_comments = [c for c in store if norm.STATE_COMMENT_MARKER in c["body"]]
+        assert len(marker_comments) == 1
+        assert marker_comments[0]["body"] == bodies[-1]
+
     def test_tres_chamadas_resultam_em_exatamente_um_comentario(self) -> None:
         """Invariante central da issue #82: após N chamadas, a issue tem 1 comentário com o marker.
 
