@@ -2020,8 +2020,8 @@ def _apply_reviewer_decision_labels(
     aplicar, mas os loops de dispatch de reviewer historicamente as descartavam —
     deixando o lock crewflow:reviewed preso na issue. Este helper reintroduz a
     aplicação para que o lock obsoleto seja efetivamente removido antes da
-    re-análise. Fail-closed: qualquer erro de I/O é engolido (não deve bloquear o
-    dispatch), assim como nos demais loops.
+    re-análise. Fail-open: qualquer erro de I/O é engolido para não bloquear o
+    dispatch, assim como nos demais loops.
     """
     _add = getattr(decision, "add_labels", ()) or ()
     _remove = getattr(decision, "remove_labels", ()) or ()
