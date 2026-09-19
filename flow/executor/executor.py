@@ -294,13 +294,17 @@ def decide(
                     add_labels=("crewflow:done",),
                     remove_labels=("crewflow:review", "crewflow:reviewed"),
                 )
+            # A issue já carrega crewflow:reviewed (aplicado pelo estágio do
+            # reviewer), então nada precisa ser aplicado aqui. Como decisões SKIP
+            # são curto-circuitadas antes da escrita de labels, não passamos
+            # add_labels para não induzir a leitura errada de que a label seria
+            # gravada nesse caminho.
             return ExecutorDecision(
                 action=ActionKind.SKIP,
                 reason=(
                     "auto_merge_on_approve desligado — aprovado, aplicando "
                     "crewflow:reviewed e aguardando merge manual"
                 ),
-                add_labels=("crewflow:reviewed",),
             )
 
         # Reviewer tem comentários — marca changes-requested para disparar re-trabalho

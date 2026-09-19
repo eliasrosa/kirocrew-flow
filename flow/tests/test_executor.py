@@ -377,9 +377,10 @@ class TestGate2AutoMerge:
         )
         d = decide(r, state_comment=state_comment, squad=self._squad(auto_merge_on_approve=False))
         assert d.action is not ActionKind.MERGE_PR
+        # Para em reviewed: review NÃO é removido, done NÃO é adicionado.
+        # A issue já carrega crewflow:reviewed do estágio do reviewer, então o
+        # SKIP não precisa (nem consegue) reaplicá-la.
         assert d.action is ActionKind.SKIP
-        # crewflow:reviewed permanece; review NÃO é removido; done NÃO é adicionado.
-        assert "crewflow:reviewed" in d.add_labels
         assert "crewflow:review" not in d.remove_labels
         assert "crewflow:done" not in d.add_labels
         assert "merge manual" in d.reason
@@ -395,7 +396,6 @@ class TestGate2AutoMerge:
         d = decide(r, state_comment=state_comment, squad=None)
         assert d.action is not ActionKind.MERGE_PR
         assert d.action is ActionKind.SKIP
-        assert "crewflow:reviewed" in d.add_labels
         assert "crewflow:review" not in d.remove_labels
         assert "crewflow:done" not in d.add_labels
         assert "merge manual" in d.reason
