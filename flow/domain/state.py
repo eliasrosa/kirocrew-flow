@@ -193,3 +193,33 @@ def can_transition(de: State, para: State) -> bool:
 
     # Voltar para DEV é sempre válido (reprovar gate)
     return para is State.DEV and de not in (State.SPEC, State.READY, State.TODO, State.DEV)
+
+
+def transition_state(
+    labels: set[str] | frozenset[str] | list[str],
+    novo_estado: State,
+) -> set[str]:
+    """Aplica ``novo_estado`` de forma atômica, garantindo 1 estado por vez.
+
+    Retorna um NOVO conjunto de labels em que:
+
+    - existe exatamente 1 label de estado, igual a ``novo_estado.value``;
+    - TODOS os outros estados são removidos (mesmo quando a entrada,
+      erroneamente, tinha 2+ estados simultâneos — o bug da issue #107);
+    - modificadores (``blocked``/``running``/``reviewed``/``hml-bypass``/
+      ``changes-requested``/``conflito``), labels de tipo/prioridade
+      (``crewflow:feature|bug|hotfix|debt``, ``crewflow:p1|p2|p3``) e
+      quaisquer labels estrangeiras (ex: ``phase-1``) são preservados
+      intactos.
+
+    Reforça a invariante do README: "Estados — 1 por vez, nesta ordem".
+    Esta é a única fonte de verdade para uma troca de estado e vive na
+    camada de domínio (função pura, sem I/O). Aceita ``set``/``frozenset``/
+    ``list`` de str porque o adapter de deployment passa ``list[str]`` e o
+    scanner usa ``frozenset``. É idempotente: aplicá-la duas vezes com o
+    mesmo alvo produz o mesmo resultado.
+    """
+    state_values = {s.value for s in State}
+    resultado = {label for label in labels if label not in state_values}
+    resultado.add(novo_estado.value)
+    return resultado

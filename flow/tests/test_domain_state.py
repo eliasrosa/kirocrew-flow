@@ -16,7 +16,10 @@ from flow.domain.state import (
     is_dispatchable,
     parse_modifiers,
     parse_state,
+    transition_state,
 )
+
+STATE_VALUES = {s.value for s in State}
 
 # ---------------------------------------------------------------------------
 # Constantes e enum
@@ -212,3 +215,97 @@ class TestCanTransition:
     def test_todo_nao_volta_para_dev_pois_ja_e_anterior(self) -> None:
         """TODO → DEV é avanço sequencial (válido), não retorno."""
         assert can_transition(State.TODO, State.DEV)
+
+
+# ---------------------------------------------------------------------------
+# transition_state — invariante "1 estado por vez" (issue #107)
+# ---------------------------------------------------------------------------
+
+class TestTransitionState:
+    def test_todo_para_dev_remove_todo_e_adiciona_dev(self) -> None:
+        resultado = transition_state({"crewflow:todo"}, State.DEV)
+        assert "crewflow:dev" in resultado
+        assert "crewflow:todo" not in resultado
+
+    def test_dev_para_review_remove_dev_e_adiciona_review(self) -> None:
+        resultado = transition_state({"crewflow:dev"}, State.REVIEW)
+        assert "crewflow:review" in resultado
+        assert "crewflow:dev" not in resultado
+
+    def test_dois_estados_colapsam_para_exatamente_um(self) -> None:
+        """O bug da #107: entrada com todo E review termina com 1 estado."""
+        entrada = {"crewflow:todo", "crewflow:review"}
+        resultado = transition_state(entrada, State.QA)
+        assert len(resultado & STATE_VALUES) == 1
+        assert "crewflow:qa" in resultado
+        assert "crewflow:todo" not in resultado
+        assert "crewflow:review" not in resultado
+
+    def test_preserva_modificadores(self) -> None:
+        entrada = {
+            "crewflow:todo",
+            "crewflow:running",
+            "crewflow:reviewed",
+            "crewflow:changes-requested",
+            "crewflow:blocked",
+        }
+        resultado = transition_state(entrada, State.DEV)
+        assert "crewflow:running" in resultado
+        assert "crewflow:reviewed" in resultado
+        assert "crewflow:changes-requested" in resultado
+        assert "crewflow:blocked" in resultado
+        assert "crewflow:dev" in resultado
+        assert "crewflow:todo" not in resultado
+
+    def test_preserva_tipo_e_prioridade(self) -> None:
+        entrada = {"crewflow:todo", "crewflow:feature", "crewflow:p2"}
+        resultado = transition_state(entrada, State.DEV)
+        assert "crewflow:feature" in resultado
+        assert "crewflow:p2" in resultado
+        assert "crewflow:dev" in resultado
+
+    def test_preserva_labels_estrangeiras(self) -> None:
+        entrada = {"crewflow:todo", "phase-1", "documentation"}
+        resultado = transition_state(entrada, State.DEV)
+        assert "phase-1" in resultado
+        assert "documentation" in resultado
+
+    def test_idempotente_aplicado_duas_vezes(self) -> None:
+        entrada = {"crewflow:dev", "crewflow:feature", "phase-1"}
+        uma = transition_state(entrada, State.REVIEW)
+        duas = transition_state(uma, State.REVIEW)
+        assert uma == duas
+
+    def test_estado_ja_presente_produz_mesmo_conjunto(self) -> None:
+        entrada = {"crewflow:review", "crewflow:running"}
+        resultado = transition_state(entrada, State.REVIEW)
+        assert resultado == entrada
+
+    def test_exatamente_um_estado_no_resultado(self) -> None:
+        entrada = {"crewflow:spec", "crewflow:feature", "phase-1"}
+        for alvo in State:
+            resultado = transition_state(entrada, alvo)
+            assert len(resultado & STATE_VALUES) == 1
+            assert alvo.value in resultado
+
+    def test_aceita_lista_como_entrada(self) -> None:
+        """deployment passa list[str]."""
+        entrada = ["crewflow:todo", "crewflow:p2"]
+        resultado = transition_state(entrada, State.DEV)
+        assert isinstance(resultado, set)
+        assert "crewflow:dev" in resultado
+        assert "crewflow:p2" in resultado
+        assert "crewflow:todo" not in resultado
+
+    def test_aceita_frozenset_como_entrada(self) -> None:
+        """scanner usa frozenset."""
+        entrada = frozenset({"crewflow:todo", "crewflow:blocked"})
+        resultado = transition_state(entrada, State.DEV)
+        assert isinstance(resultado, set)
+        assert "crewflow:dev" in resultado
+        assert "crewflow:blocked" in resultado
+
+    def test_retorna_novo_conjunto_sem_mutar_entrada(self) -> None:
+        entrada = {"crewflow:todo", "crewflow:feature"}
+        transition_state(entrada, State.DEV)
+        assert entrada == {"crewflow:todo", "crewflow:feature"}
