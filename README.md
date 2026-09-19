@@ -118,6 +118,14 @@ routing:
 # Edite ~/.kiro/crew/crons/deployment.config.yaml com seus paths.
 ```
 
+> **Reinstale o cron após QUALQUER mudança em `deployment/deployment.py` ou em
+> `flow/prompts/*.md`.** O script instalado em `~/.kiro/crew/crons/deployment.py`
+> é uma cópia; se o repo evolui e o cron não é reinstalado, template e código
+> ficam descompassados e o dispatch pode abortar (bug #116). Rode
+> `./scripts/install-cron.sh` de novo. O cron avisa no log quando detecta que a
+> cópia instalada está desatualizada, e o teste de paridade
+> (`flow/tests/test_prompt_template_parity.py`) barra o descompasso no CI.
+
 Depois registre os crons no dashboard do Kiro Crew. Há duas opções:
 
 **Opção A — crons por estágio (recomendado):**
@@ -183,6 +191,13 @@ Edite o MD livremente. Placeholders usam `{{nome}}`. Se um placeholder referenci
 uma variável que o motor não fornece, o dispatch **falha explicitamente** (fail-closed)
 em vez de mandar o prompt quebrado. Em caso de arquivo ausente, o motor usa o fallback
 embutido em `deployment.py`.
+
+> **Editou um template? Rode `./scripts/install-cron.sh`.** O cron roda a cópia
+> instalada de `deployment.py`, não a do repo. Se você adiciona um placeholder
+> novo (ex: `{{head_sha}}`) sem reinstalar o cron, o código instalado não passa
+> a variável e o dispatch aborta — foi exatamente o bug #116. O teste de paridade
+> `flow/tests/test_prompt_template_parity.py` garante que todo placeholder de
+> template tem variável correspondente no código e quebra o CI caso contrário.
 
 ### Comportamento do reviewer (`reviewer.md`)
 

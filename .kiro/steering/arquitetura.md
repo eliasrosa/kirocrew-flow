@@ -58,6 +58,7 @@ flow/tests/
 ├── test_adapter_github.py
 ├── test_adapter_jira.py
 ├── test_provider_parity.py     — garante que os dois adapters expõem a mesma superfície
+├── test_prompt_template_parity.py — garante que todo placeholder de template tem variável no dispatcher (#116)
 ├── test_scan_cache.py
 ├── test_scan_scanner.py
 ├── test_executor.py
@@ -203,6 +204,21 @@ O script:
 
 Se você copiar o script manualmente sem usar `install-cron.sh`, o patch será perdido e o cron vai falhar com `ModuleNotFoundError: No module named 'flow'`.
 
+**Reinstale o cron após QUALQUER mudança em `deployment/deployment.py` OU em
+`flow/prompts/*.md`.** O cron roda a cópia instalada, não o repo. Se o repo evolui
+(ex: `reviewer.md` ganha `{{head_sha}}` e o dispatcher passa a variável) mas o cron
+não é reinstalado, a cópia instalada não fornece a variável nova e o dispatch aborta
+com `PromptRenderError` — foi o bug #116, que travou a esteira por ~12h. Rode
+`./scripts/install-cron.sh` de novo.
+
+Duas defesas contra esse descompasso:
+- `_warn_if_installed_script_stale()` roda no início de cada ciclo (`run`/`_run_stage`)
+  e emite `logger.warning` quando a cópia instalada diverge do repo. A comparação
+  normaliza o fonte ignorando o bloco de patch de `sys.path` (`_FLOW_ROOT`), então não
+  há falso positivo; é tolerante a ausência (dev local) e nunca aborta (só avisa).
+- `test_prompt_template_parity.py` é o gate de CI: quebra antes de o descompasso
+  chegar ao cron (ver seção "Prompts externalizados").
+
 ## Rodar o CI localmente
 
 ```bash
@@ -280,13 +296,29 @@ cada placeholder pelo valor correspondente passado como keyword argument.
 
 ### Contrato de fail-closed
 
-- **Variável faltando** → `PromptRenderError` — o dispatch é abortado, nunca envia
-  prompt incompleto.
+- **Variável faltando** → `PromptRenderError` — o loader é fail-closed, nunca envia
+  prompt incompleto. Cada `_dispatch_*` captura essa exceção, loga o motivo, notifica
+  o humano e retorna SEM derrubar a run (degradação graciosa, simétrica entre dev,
+  reviewer, rework e conflict). Não enfraqueça o loader silenciando `PromptRenderError`
+  dentro dele — o tratamento fica no dispatcher.
 - **Template ausente/ilegível** → usa o **fallback embutido** definido em `deployment.py`
   — mesmo conteúdo que o MD versiona, nunca silencioso.
+
+**Editar um template exige reinstalar o cron.** Placeholder novo em `flow/prompts/*.md`
+só funciona se o `deployment.py` instalado passar a variável correspondente. Rode
+`./scripts/install-cron.sh` após editar qualquer template (ver "Instalação do cron").
+O gate de CI `test_prompt_template_parity.py` extrai os placeholders de cada
+`flow/prompts/*.md` (mesma regex do loader) e confere que o dispatcher fornece cada
+variável — quebra o CI se um template referenciar variável que o código não passa.
+Como `test_provider_parity.py`, ele tem auto-guard: um template novo sem entrada na
+tabela `STAGES` faz o teste falhar.
 
 ### Adicionar um novo estágio
 
 1. Crie `flow/prompts/<estágio>.md` com os placeholders `{{variavel}}`.
 2. Chame `render_prompt("<estágio>", fallback=..., **vars)` no `deployment.py`.
 3. Adicione testes smoke em `flow/tests/test_prompts_loader.py` (classe `TestRealTemplates`).
+4. **Obrigatório:** adicione o estágio à tabela `STAGES` em
+   `test_prompt_template_parity.py` — senão o `test_a_tabela_cobre_todos_os_templates`
+   quebra e o template novo passaria sem verificação de paridade.
+5. Reinstale o cron com `./scripts/install-cron.sh`.

@@ -115,6 +115,77 @@ def _apply_state_transition(
     return sorted(result)  # sorted para determinismo nos testes
 
 
+# ── Detecção de divergência script-instalado vs repo ─────────────────────
+# Caminho canônico onde scripts/install-cron.sh instala o cron.
+_INSTALLED_SCRIPT_PATH = os.path.expanduser("~/.kiro/crew/crons/deployment.py")
+
+
+def _normalize_deployment_source(content: str) -> str:
+    """Normaliza o fonte do deployment.py para comparação de divergência.
+
+    O install-cron.sh injeta um bloco de patch de sys.path (linhas com
+    ``_FLOW_ROOT`` e um comentário) entre ``_REPO_ROOT = os.path.dirname(_HERE)``
+    e o ``if _REPO_ROOT not in sys.path:`` original. Esse bloco é a ÚNICA
+    diferença esperada entre o script do repo e o instalado, então um hash
+    byte-a-byte daria falso positivo. A normalização é determinística:
+    descarta toda linha que faz parte do patch (contém ``_FLOW_ROOT``) e o
+    comentário que o acompanha, deixando apenas o conteúdo lógico do módulo.
+    """
+    linhas_uteis: list[str] = []
+    for linha in content.splitlines():
+        if "_FLOW_ROOT" in linha:
+            continue
+        # Comentários injetados pelo patch descrevem o _FLOW_ROOT; descarta.
+        if "onde flow/ não existe" in linha or "aponta para ~/.kiro/crew/" in linha:
+            continue
+        linhas_uteis.append(linha)
+    return "\n".join(linhas_uteis)
+
+
+def _warn_if_installed_script_stale() -> None:
+    """Avisa (sem abortar) quando o cron instalado diverge do deployment.py do repo.
+
+    Motivação (bug #116): quando flow/prompts/*.md ou deployment.py mudam no
+    repo mas ``scripts/install-cron.sh`` não é rodado de novo, o script instalado
+    em ``~/.kiro/crew/crons/deployment.py`` fica desatualizado e o dispatch pode
+    exigir variáveis de template que o código instalado não fornece.
+
+    Comportamento:
+    - Se não há script instalado: silêncio (é dev local rodando direto do repo).
+    - Se instalado == repo (ignorando o patch de sys.path): silêncio.
+    - Se divergem: ``logger.warning`` pedindo para rodar install-cron.sh.
+    - NUNCA aborta: qualquer erro de leitura vira warning e segue.
+    """
+    installed_path = _INSTALLED_SCRIPT_PATH
+    repo_path = os.path.abspath(__file__)
+
+    # Se o próprio módulo em execução JÁ é o instalado, não há o que comparar.
+    if os.path.abspath(installed_path) == repo_path:
+        return
+    if not os.path.exists(installed_path):
+        return  # dev local — nada instalado, sem aviso
+
+    try:
+        with open(installed_path, encoding="utf-8") as f:
+            installed_src = f.read()
+        with open(repo_path, encoding="utf-8") as f:
+            repo_src = f.read()
+    except OSError as exc:
+        logger.warning(
+            "deployment: não foi possível comparar o script instalado com o repo: %s",
+            exc,
+        )
+        return
+
+    if _normalize_deployment_source(installed_src) != _normalize_deployment_source(repo_src):
+        logger.warning(
+            "deployment: o cron instalado em %s diverge do deployment.py do repo. "
+            "Rode ./scripts/install-cron.sh para reinstalar — senão templates e código "
+            "podem ficar descompassados (bug #116).",
+            installed_path,
+        )
+
+
 # ── Carregamento de config ────────────────────────────────────────────────
 _CONFIG_CANDIDATES = [
     os.path.join(_HERE, "deployment.config.yaml"),
@@ -843,6 +914,7 @@ def _log_cycle_summary(
 
 
 def run(ctx: object) -> None:
+    _warn_if_installed_script_stale()
     cfg = _load_config()
     repos: list[str] = cfg.get("repos") or []
     auto = bool(cfg.get("auto_dispatch", False))
@@ -2104,9 +2176,31 @@ def _dispatch_reviewer(
             repo, pr_number, exc_sha,
         )
 
+    # Renderiza o prompt ANTES do POST, capturando PromptRenderError como fazem
+    # _dispatch_rework e _dispatch_conflict_resolver. O loader é fail-closed: se o
+    # template exige uma variável que este código não fornece (ex: {{head_sha}} num
+    # deployment.py instalado desatualizado — bug da #116), a exceção NÃO pode
+    # derrubar a run inteira. Degradação graciosa = logar o motivo, notificar o
+    # humano para que reinstale o cron via scripts/install-cron.sh, e retornar.
+    # NÃO enfraquecemos o loader fail-closed — só tratamos o erro no dispatcher.
+    try:
+        message = _reviewer_prompt(repo, pr_number, issue_number, head_sha=head_sha)
+    except PromptRenderError as exc:
+        logger.error(
+            "deployment: _dispatch_reviewer abortado — template 'reviewer' inválido "
+            "para %s PR#%s (issue #%s): %s. Reinstale o cron com scripts/install-cron.sh.",
+            repo, pr_number, issue_number, exc,
+        )
+        ctx.notify(  # type: ignore[attr-defined]
+            f"KiroCrew Flow: reviewer NÃO despachado para {repo} PR #{pr_number} "
+            f"(issue #{issue_number}) — template desatualizado (variável faltando). "
+            f"Rode scripts/install-cron.sh para reinstalar o cron.{vm}"
+        )
+        return
+
     import urllib.request as _u
     body = json.dumps({
-        "message": _reviewer_prompt(repo, pr_number, issue_number, head_sha=head_sha),
+        "message": message,
         "agent": cfg.get("agent") or "kirocrew",
         "slot": slot,
         "memory_mode": "temporary",
@@ -2408,6 +2502,7 @@ def _run_stage(ctx: object, stage: str) -> None:
         ctx:   contexto do cron do Kiro Crew
         stage: um dos valores _STAGE_* (dev/reviewer/merge/conflito)
     """
+    _warn_if_installed_script_stale()
     cfg = _load_config()
 
     # Substituição de agente por modelo do estágio
