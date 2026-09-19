@@ -133,6 +133,23 @@ def parse_state(labels: set[str] | frozenset[str]) -> State | None:
     return State(next(iter(encontrados)))
 
 
+def state_labels_present(labels: set[str] | frozenset[str] | list[str]) -> set[str]:
+    """Retorna TODAS as labels de estado presentes no conjunto.
+
+    Diferente de :func:`parse_state` (que lança ``EstadoAmbiguo`` quando há
+    2+ estados), esta função nunca levanta erro — ela apenas reporta o
+    conjunto de estados encontrados. Útil para a camada de deployment
+    DETECTAR a acumulação da issue #107 (ex.: ``crewflow:todo`` **e**
+    ``crewflow:review`` ao mesmo tempo) e decidir colapsar para 1 estado,
+    já que o scanner descarta issues ambíguas (``current_state=None``) e elas
+    nunca chegam ao executor.
+
+    Retorna um ``set`` vazio quando nenhuma label de estado está presente.
+    """
+    state_values = {s.value for s in State}
+    return {label for label in labels if label in state_values}
+
+
 def parse_modifiers(labels: set[str] | frozenset[str]) -> frozenset[Modifier]:
     """Extrai os modificadores de um conjunto de labels.
 

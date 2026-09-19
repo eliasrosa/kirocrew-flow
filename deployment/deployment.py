@@ -803,6 +803,127 @@ def _apply_dev_transition(
         )
 
 
+def _apply_review_transition(
+    provider: object,
+    repo: str,
+    issue: dict,
+) -> bool:
+    """Colapsa a issue para EXATAMENTE ``crewflow:review`` via ``set_labels``.
+
+    Espelha :func:`_apply_dev_transition`, mas para o lado ``review`` da
+    esteira — o exato ponto em que a #107 acumulou (``crewflow:todo`` **e**
+    ``crewflow:review`` ao mesmo tempo, travando o dispatch do reviewer).
+
+    A transição ``dev→review`` acontece quando a sessão one-shot abre o PR; o
+    motor não observa "PR recém-aberto" diretamente. Mas o motor PODE reforçar
+    a exclusividade sempre que processa uma issue que acredita estar em review:
+    se ``issue["_labels"]`` ainda contém outros estados (``todo``/``dev``/…),
+    :func:`flow.domain.state.transition_state` remove todos e mantém só
+    ``crewflow:review`` — preservando modificadores, tipo/prioridade e labels
+    estrangeiras.
+
+    Idempotente: se a issue já tem só ``crewflow:review``, nada é reescrito e a
+    função retorna ``False`` (evita ``set_labels`` redundante). Retorna ``True``
+    quando houve colapso e ``set_labels`` foi chamado. Falhas são logadas mas
+    não propagam — o dispatch do reviewer não deve travar por causa disso.
+    """
+    from flow.domain.state import State, state_labels_present, transition_state
+
+    base_labels = issue.get("_labels", [])
+    key = issue.get("_key") or issue.get("url") or str(issue.get("number", ""))
+
+    present = state_labels_present(base_labels)
+    # Só reescreve quando há acumulação: 2+ estados, ou um estado != review.
+    # Um único crewflow:review já satisfaz a invariante — não toca.
+    if present == {State.REVIEW.value}:
+        return False
+    if State.REVIEW.value not in present and len(present) <= 1:
+        # Sem review e no máximo 1 estado: não é o caso da #107 nesta rota.
+        # Ainda assim colapsamos para review (a issue está sendo tratada como
+        # review pelo dispatch), garantindo exatamente 1 estado.
+        pass
+
+    try:
+        new_labels = transition_state(base_labels, State.REVIEW)
+        provider.set_labels(repo, key, sorted(new_labels))  # type: ignore[attr-defined]
+        # Mantém issue["_labels"] coerente para chamadas subsequentes no ciclo.
+        issue["_labels"] = sorted(new_labels)
+        logger.info(
+            "deployment: exclusividade de estado reforçada em %s → crewflow:review "
+            "(estados anteriores %s removidos, labels=%s)",
+            key, sorted(present), sorted(new_labels),
+        )
+        return True
+    except Exception as exc:
+        logger.error(
+            "deployment: falha ao reforçar transição →review em %s: %s", key, exc
+        )
+        return False
+
+
+def _enforce_review_exclusivity(
+    provider: object,
+    repos: list[str],
+    projects: Iterable[str],
+) -> list[str]:
+    """Varre issues em ``crewflow:review`` e colapsa acumulações da #107.
+
+    Rede de segurança defensiva: uma issue com ``crewflow:review`` **e** outro
+    estado (``crewflow:todo``/``crewflow:dev``) é AMBÍGUA para o scanner, que a
+    descarta (``current_state=None``) — ela nunca chega ao executor nem ao loop
+    de dispatch do reviewer, ficando travada exatamente como a #107. Este passo
+    roda ANTES do dispatch: lista as issues rotuladas ``crewflow:review`` via
+    ``provider.list_by_state`` (que casa por essa label independentemente de
+    quais outras estejam presentes) e, para cada uma que carrega estado extra,
+    colapsa para EXATAMENTE ``crewflow:review`` via
+    :func:`flow.domain.state.transition_state`.
+
+    Retorna as keys colapsadas (para log/notify). Nunca propaga exceção — é uma
+    salvaguarda, não um caminho crítico. Não é chamada em dry-run (o chamador
+    controla isso — nenhum ``set_labels`` deve ocorrer em dry-run).
+    """
+    from flow.domain.state import State, state_labels_present, transition_state
+
+    collapsed: list[str] = []
+    seen: set[str] = set()
+    for project in projects:
+        try:
+            items = provider.list_by_state(project, State.REVIEW.value)  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.warning(
+                "deployment: enforce-review: erro ao listar %s em %s: %s",
+                State.REVIEW.value, project, exc,
+            )
+            continue
+        for raw in items:
+            key = raw.get("key", "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            labels = raw.get("labels", [])
+            present = state_labels_present(labels)
+            # Só age na acumulação: review presente + ao menos mais um estado.
+            if State.REVIEW.value not in present or len(present) <= 1:
+                continue
+            repo = key.split("/issues/")[0].replace("https://github.com/", "") or (
+                repos[0] if repos else project
+            )
+            try:
+                new_labels = transition_state(labels, State.REVIEW)
+                provider.set_labels(repo, key, sorted(new_labels))  # type: ignore[attr-defined]
+                collapsed.append(key)
+                logger.warning(
+                    "deployment: enforce-review: #107 detectada em %s — estados %s "
+                    "colapsados para crewflow:review (labels=%s)",
+                    key, sorted(present), sorted(new_labels),
+                )
+            except Exception as exc:
+                logger.error(
+                    "deployment: enforce-review: falha ao colapsar %s: %s", key, exc
+                )
+    return collapsed
+
+
 # ── Ponto de entrada do cron ──────────────────────────────────────────────
 
 def _dry_run_report(
@@ -1163,6 +1284,15 @@ def run(ctx: object) -> None:
             if _num_ds and not _issue_has_active_session(_repo_ds, _num_ds, dev_root):
                 dead_session_candidates.append(_r_ds)
 
+    # ── Salvaguarda #107: reconcilia acumulações crewflow:review + outro estado ──
+    # Issues com 2+ estados são AMBÍGUAS: o scanner as descarta
+    # (current_state=None) e elas nunca chegam a scan_results — travando
+    # exatamente como a #107. Este passo defensivo roda ANTES do early-return
+    # e do dispatch, listando as issues rotuladas crewflow:review direto na API
+    # e colapsando as que carregam estado extra. Nunca roda em dry-run.
+    if not dry_run:
+        _enforce_review_exclusivity(provider, repos, scan_cfg.projects)
+
     # ── Resumo do ciclo — sempre emitido, mesmo que tudo seja SKIP ──────────
     _log_cycle_summary(
         ctx=ctx,
@@ -1377,6 +1507,11 @@ def run(ctx: object) -> None:
                     repo, issue_number,
                 )
                 continue
+            # Transição atômica →review via provider: garante que a issue tenha
+            # EXATAMENTE crewflow:review antes do dispatch do reviewer, removendo
+            # qualquer estado residual (todo/dev) que a sessão de dev não limpou
+            # — a causa raiz da #107. Idempotente: no-op se já está correto.
+            _apply_review_transition(provider, repo, issue)
             try:
                 _dispatch_reviewer(ctx, repo, issue, cfg)
             except Exception as exc:
@@ -2695,6 +2830,12 @@ def _run_stage(ctx: object, stage: str) -> None:
                 if _num_ds and not _issue_has_active_session(_repo_ds, _num_ds, dev_root):
                     dead_session_candidates_stage.append(_r_ds)
 
+    # ── Salvaguarda #107 (só no estágio reviewer): reconcilia acumulações
+    # crewflow:review + outro estado que o scanner descartou por ambiguidade
+    # (ver run()). Roda antes do early-return; nunca em dry-run.
+    if stage == _STAGE_REVIEWER and not dry_run:
+        _enforce_review_exclusivity(provider, repos, scan_cfg.projects)
+
     _log_cycle_summary(
         ctx=ctx,
         chat_id=chat_id,
@@ -2831,6 +2972,8 @@ def _run_stage(ctx: object, stage: str) -> None:
                     repo, issue_number,
                 )
                 continue
+            # Transição atômica →review antes do dispatch (ver run()).
+            _apply_review_transition(provider, repo, issue)
             try:
                 _dispatch_reviewer(ctx, repo, issue, cfg)
             except Exception as exc:

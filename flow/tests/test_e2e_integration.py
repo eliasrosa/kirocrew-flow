@@ -742,3 +742,153 @@ class TestStateTransitionExclusivityE2E:
         assert "crewflow:dev" not in novo
         assert "crewflow:running" in novo  # modificador preservado
         assert "crewflow:feature" in novo
+
+    def test_apply_review_transition_derruba_estado_residual(self) -> None:
+        """_apply_review_transition colapsa todo/dev residual → só review."""
+        from deployment.deployment import _apply_review_transition
+
+        provider = mock.MagicMock()
+        provider.set_labels.return_value = None
+        issue = {
+            "number": 107,
+            "title": "[api-gateway2] Bug #107",
+            "url": "https://github.com/owner/api-gateway2/issues/107",
+            # #107: review acumulado com todo residual.
+            "_labels": ["crewflow:todo", "crewflow:review", "crewflow:feature", "crewflow:p1"],
+            "_key": "https://github.com/owner/api-gateway2/issues/107",
+        }
+
+        applied_flag = _apply_review_transition(provider, "owner/api-gateway2", issue)
+
+        assert applied_flag is True
+        provider.set_labels.assert_called_once()
+        applied = provider.set_labels.call_args[0][2]
+        assert self._state_labels(applied) == {"crewflow:review"}
+        assert "crewflow:todo" not in applied
+        assert "crewflow:dev" not in applied
+        assert "crewflow:feature" in applied
+        assert "crewflow:p1" in applied
+
+    def test_apply_review_transition_idempotente_nao_reescreve(self) -> None:
+        """Issue já só com review → nenhum set_labels redundante."""
+        from deployment.deployment import _apply_review_transition
+
+        provider = mock.MagicMock()
+        issue = {
+            "number": 42,
+            "title": "ok",
+            "url": "https://github.com/owner/api-gateway2/issues/42",
+            "_labels": ["crewflow:review", "crewflow:feature"],
+            "_key": "https://github.com/owner/api-gateway2/issues/42",
+        }
+
+        applied_flag = _apply_review_transition(provider, "owner/api-gateway2", issue)
+
+        assert applied_flag is False
+        provider.set_labels.assert_not_called()
+
+    def test_run_dispatch_reviewer_colapsa_estado_residual(self) -> None:
+        """run(): issue em review parseado com todo residual → engine colapsa.
+
+        Prova que o MOTOR (não só o helper de domínio) reescreve as labels para
+        exatamente crewflow:review na rota do reviewer, removendo o
+        crewflow:todo acumulado da #107.
+        """
+        from deployment.deployment import run
+        from flow.domain.gates import WorkItem
+
+        ctx = self._make_ctx()
+        # Issue já roteada como REVIEW pelo scanner, mas com todo residual
+        # ainda presente nas labels cruas (o resquício da #107).
+        result = ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/api-gateway2/issues/107",
+                title="[api-gateway2] Bug #107",
+                labels=frozenset(["crewflow:review", "crewflow:todo", "crewflow:feature"]),
+            ),
+            current_state=State.REVIEW,
+            modifiers=frozenset(),
+            dispatch_candidate=False,
+            spec_valid=None,
+            changed=True,
+            reason="test",
+        )
+
+        provider_mock = mock.MagicMock()
+        provider_mock.get_state_comment.return_value = None
+        provider_mock.get_pr_for_issue.return_value = {"mergeable": "MERGEABLE"}
+        provider_mock.list_by_state.return_value = []  # pré-passe defensivo vazio
+        provider_mock.set_labels.return_value = None
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=self._config()),
+            mock.patch("deployment.deployment.scan_candidates",
+                       return_value=[result]),
+            mock.patch("deployment.deployment.provider_for",
+                       return_value=provider_mock),
+            mock.patch("deployment.deployment._reviewer_has_active",
+                       return_value=False),
+            mock.patch("deployment.deployment._dispatch_reviewer") as mock_disp_rev,
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+        ):
+            mock_cache.return_value = sqlite3.connect(":memory:")
+            run(ctx)
+
+        # O reviewer foi despachado...
+        mock_disp_rev.assert_called_once()
+        # ...e o motor colapsou o estado residual para exatamente review.
+        assert provider_mock.set_labels.called
+        applied = provider_mock.set_labels.call_args_list[-1][0][2]
+        assert self._state_labels(applied) == {"crewflow:review"}
+        assert "crewflow:todo" not in applied
+        assert "crewflow:dev" not in applied
+        assert "crewflow:feature" in applied
+
+    def test_run_enforce_review_exclusivity_reconcilia_107_ambigua(self) -> None:
+        """run(): #107 ambígua (todo+review) é descartada pelo scanner mas o
+        pré-passe defensivo a reconcilia direto na API.
+
+        O scanner nunca emite a issue (parse_state levanta EstadoAmbiguo →
+        current_state=None), então ela não aparece em scan_results. O motor
+        precisa reconciliá-la mesmo assim: _enforce_review_exclusivity lista as
+        issues rotuladas crewflow:review e colapsa as que têm estado extra.
+        """
+        from deployment.deployment import run
+
+        ctx = self._make_ctx()
+
+        provider_mock = mock.MagicMock()
+        provider_mock.get_state_comment.return_value = None
+        # A issue #107 corrompida: todo E review ao mesmo tempo.
+        provider_mock.list_by_state.return_value = [
+            {
+                "key": "https://github.com/owner/api-gateway2/issues/107",
+                "labels": ["crewflow:todo", "crewflow:review", "crewflow:feature"],
+            }
+        ]
+        provider_mock.set_labels.return_value = None
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=self._config()),
+            # Scanner descarta a issue ambígua — scan_results vazio.
+            mock.patch("deployment.deployment.scan_candidates",
+                       return_value=[]),
+            mock.patch("deployment.deployment.provider_for",
+                       return_value=provider_mock),
+            mock.patch("deployment.deployment._reviewer_has_active",
+                       return_value=False),
+            mock.patch("deployment.deployment._dispatch_reviewer"),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+        ):
+            mock_cache.return_value = sqlite3.connect(":memory:")
+            run(ctx)
+
+        # O motor colapsou a issue ambígua para exatamente crewflow:review.
+        provider_mock.set_labels.assert_called_once()
+        applied = provider_mock.set_labels.call_args[0][2]
+        assert self._state_labels(applied) == {"crewflow:review"}
+        assert "crewflow:todo" not in applied
+        assert "crewflow:review" in applied
+        assert "crewflow:feature" in applied
