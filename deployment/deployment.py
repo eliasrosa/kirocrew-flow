@@ -579,40 +579,68 @@ def _dispatch_prompt(
 
 
 def _pr_exists(repo: str, issue_number: int) -> bool:
-    """Retorna True se já existe um PR aberto para a branch feat/issue-<N> neste repo.
+    """Retorna True se já existe um PR aberto para a issue N neste repo.
 
     Previne que a sessão one-shot abra um segundo PR quando a primeira branch
-    já está em review (ex.: conflito de merge na primeira tentativa).
+    já está em review — inclusive quando a branch tem nome alternativo (não segue
+    o padrão ``feat/issue-N``).
+
+    Estratégia dupla (rede de segurança):
+    1. Busca pelo nome canônico da branch (``--head feat/issue-N``) — rápido e
+       preciso quando o padrão é seguido.
+    2. Busca por referência à issue no corpo do PR (``--search "Closes #N in:body"``
+       ou ``"Fixes #N in:body"``) — captura PRs com branch de nome alternativo.
+
+    Retorna True se qualquer das duas buscas encontrar ao menos uma PR aberta.
     """
+    import json as _json
     import subprocess
+
     branch = f"feat/issue-{issue_number}"
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "list", "--repo", repo, "--head", branch,
-             "--state", "open", "--json", "number"],
-            capture_output=True, text=True, timeout=15, check=False,
-        )
-        if result.returncode != 0:
+
+    def _run_gh_pr_list(extra_args: list[str]) -> list[dict]:
+        """Executa gh pr list com os args fornecidos e retorna a lista de PRs."""
+        cmd = ["gh", "pr", "list", "--repo", repo, "--state", "open",
+               "--json", "number"] + extra_args
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15, check=False,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "deployment: gh pr list falhou para %s (%s): %s",
+                    repo, " ".join(extra_args), result.stderr.strip(),
+                )
+                return []
+            return _json.loads(result.stdout or "[]")
+        except Exception as exc:
             logger.warning(
-                "deployment: gh pr list falhou para %s head=%s: %s",
-                repo, branch, result.stderr.strip(),
+                "deployment: erro em gh pr list para %s (%s): %s",
+                repo, " ".join(extra_args), exc,
             )
-            return False
-        import json as _json
-        prs = _json.loads(result.stdout or "[]")
-        if prs:
-            logger.info(
-                "deployment: PR já existe para %s#%s (branch %s) — dispatch ignorado",
-                repo, issue_number, branch,
-            )
-            return True
-        return False
-    except Exception as exc:
-        logger.warning(
-            "deployment: erro ao verificar PR existente para %s#%s: %s",
-            repo, issue_number, exc,
+            return []
+
+    # 1ª busca: nome canônico da branch
+    prs_by_branch = _run_gh_pr_list(["--head", branch])
+    if prs_by_branch:
+        logger.info(
+            "deployment: PR já existe para %s#%s (branch %s) — dispatch ignorado",
+            repo, issue_number, branch,
         )
-        return False
+        return True
+
+    # 2ª busca: referência à issue no corpo da PR (branch de nome alternativo)
+    search_query = f"Closes #{issue_number} in:body"
+    prs_by_body = _run_gh_pr_list(["--search", search_query])
+    if prs_by_body:
+        pr_numbers = [p.get("number") for p in prs_by_body]
+        logger.info(
+            "deployment: PR já existe para %s#%s (branch alternativa, PRs=%s) — dispatch ignorado",
+            repo, issue_number, pr_numbers,
+        )
+        return True
+
+    return False
 
 
 def _dispatch(
