@@ -21,7 +21,7 @@ description: Arquitetura hexagonal, stack, convenções de código e qualidade d
 ```
 flow/
 ├── domain/                     ← NÚCLEO: sem I/O, testável sem mock
-│   ├── state.py                — State, Modifier, is_dispatchable(), can_transition()
+│   ├── state.py                — State, Modifier, is_dispatchable(), can_transition(), transition_state()
 │   └── gates.py                — Result, WorkItem, Squad, can_leave_spec(), triage_hotfix()...
 ├── ports/
 │   └── issue_provider.py       — IssueProvider (Protocol), provider_for(), PROVIDERS
@@ -110,6 +110,11 @@ executor.decide(scan_result, state_comment)    ←  puro Python, sem I/O
                                     ↓ ExecutorDecision
 deployment.py  →  set_labels() + upsert_state_comment() + _dispatch()
 ```
+
+Toda troca de estado aplicada pelo `deployment.py` passa por
+`transition_state()` (em `flow/domain/state.py`), de modo que a invariante "1 estado por
+vez" nunca é violada: aplicar um novo estado remove os demais na mesma operação
+`set_labels`, preservando modificadores e tipo/prioridade.
 
 ## Convenções de código
 

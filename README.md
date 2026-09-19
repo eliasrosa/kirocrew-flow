@@ -26,6 +26,15 @@ Duas dimensões independentes.
 crewflow:spec → crewflow:ready → crewflow:todo → crewflow:dev → crewflow:review → crewflow:qa → crewflow:done
 ```
 
+Essa invariante é garantida no código por `flow.domain.state.transition_state()`, uma
+função pura que devolve o conjunto de labels com **exatamente 1 estado**, removendo os
+demais e preservando modificadores (`blocked`/`running`/`reviewed`/`conflito`/
+`changes-requested`) e tipo/prioridade. O driving adapter (`deployment.py`) roteia toda
+troca de estado por ela, aplicada de forma atômica na mesma operação `set_labels`.
+Motivação: na issue #107 uma issue ficou com `crewflow:todo` e `crewflow:review` ao mesmo
+tempo, e os dois estados sobrepostos travaram o dispatch do próximo estágio até a limpeza
+manual da label.
+
 ### Modificadores — 0..N, sobrepõem ao estado
 
 | Label | Significado |

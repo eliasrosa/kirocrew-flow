@@ -66,6 +66,10 @@ sobrepostos. **Modificador de parada tem prioridade sobre o estado.**
 | `crewflow:qa` | 🔷 `#0EA5E9` | deploy HML manual + QA testa (**DEPOIS do review**) | 🧠 Dev + QA |
 | `crewflow:done` | 🟩 `#22C55E` | concluído | — |
 
+A invariante é garantida de forma atômica: aplicar um novo estado remove todos os outros
+estados na mesma operação `set_labels`, via `transition_state()`; modificadores e
+tipo/prioridade são preservados.
+
 ### Modificadores (0..N, sobrepõem)
 
 | Label | Cor | Significado |

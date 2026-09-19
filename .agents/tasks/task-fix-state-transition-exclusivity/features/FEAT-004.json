@@ -2,7 +2,7 @@
   "id": "FEAT-004",
   "type": "docs",
   "description": "Reinforce the 'Estados — 1 por vez' invariant in the README and the steering files, and document the new transition_state() helper as the single source of truth for state changes. Satisfies the acceptance criterion that README/steering reinforce the invariant in code. Depends on FEAT-002 and FEAT-003 (so the docs describe what actually exists).",
-  "status": "pending",
+  "status": "completed",
   "steps": [
     "In README.md, in the 'Modelo de labels' -> 'Estados — 1 por vez, nesta ordem' section, add a short note that state exclusivity is enforced in code by flow.domain.state.transition_state(), which produces a label set with exactly one state label while preserving modifiers and type/priority labels, and that every state change in the driving adapter goes through it. Reference the #107-style failure (two overlapping states blocking the next stage) as the motivation, briefly.",
     "In .kiro/steering/fluxo.md, in the 'Labels — duas dimensões' / 'Estados (1 por vez, ordem canônica)' area, add a sentence stating the invariant is enforced atomically: applying a new state removes all other states in the same set_labels operation, via transition_state(); modificadores e tipo/prioridade são preservados.",
@@ -21,5 +21,5 @@
     "python3.12 -m pytest flow/tests/ -q"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Docs-only change. (1) README.md: under 'Estados — 1 por vez, nesta ordem' added a paragraph noting the invariant is enforced in code by flow.domain.state.transition_state() (exactly one state label, preserves modifiers blocked/running/reviewed/conflito/changes-requested and type/priority), that deployment.py routes every state change through it atomically in the same set_labels op, and cited the #107 failure (crewflow:todo + crewflow:review overlapping, blocking next-stage dispatch until manual cleanup). (2) .kiro/steering/fluxo.md: under 'Estados (1 por vez, ordem canônica)' added a sentence that the invariant is enforced atomically via transition_state(), removing all other states in the same set_labels op while preserving modifiers and type/priority. (3) .kiro/steering/arquitetura.md: updated the flow/domain/state.py bullet to also list transition_state(), and added a note after the 'Fluxo de uma issue pela arquitetura' diagram that all state changes applied by deployment.py go through transition_state() so the '1 estado por vez' invariant is never violated. All Portuguese, no em dashes, matched surrounding tone; no mermaid/PNG regenerated. Verification: python3.12 -m ruff check flow/ clean; python3.12 -m pytest flow/tests/ -q = 586 passed, 1 failed. The single failure is the known environmental one (test_prompts_loader.py::TestRenderPromptFallback::test_template_corrompido_ilegivel_usa_fallback, chmod 0o000 ignored as root) — matches the FEAT-003 baseline and is unrelated to docs. Note: FEAT-003.json had an uncommitted status/findings update in the working tree from the prior run; left it untouched (not part of FEAT-004)."
 }
