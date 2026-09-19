@@ -837,11 +837,6 @@ def _apply_review_transition(
     # Um único crewflow:review já satisfaz a invariante — não toca.
     if present == {State.REVIEW.value}:
         return False
-    if State.REVIEW.value not in present and len(present) <= 1:
-        # Sem review e no máximo 1 estado: não é o caso da #107 nesta rota.
-        # Ainda assim colapsamos para review (a issue está sendo tratada como
-        # review pelo dispatch), garantindo exatamente 1 estado.
-        pass
 
     try:
         new_labels = transition_state(base_labels, State.REVIEW)
