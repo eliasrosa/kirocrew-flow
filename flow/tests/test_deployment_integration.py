@@ -857,16 +857,19 @@ class TestReviewerPrompt:
 
         prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
 
-        assert "REPO: owner/myrepo" in prompt
-        assert "PR: #99" in prompt
-        assert "ISSUE: #42" in prompt
+        # Header agora é uma tabela markdown (uma linha por campo), não uma
+        # lista de linhas adjacentes que o markdown colapsa num só parágrafo.
+        assert "| Repo | `owner/myrepo` |" in prompt
+        assert "| PR | #99 |" in prompt
+        assert "| Issue | #42 |" in prompt
 
     def test_titulo_da_sessao(self) -> None:
         from deployment.deployment import _reviewer_prompt
 
         prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
 
-        assert "SESSION TITLE: review: myrepo PR #99 (issue #42)" in prompt
+        # O título da sessão vira o H1 do documento.
+        assert "# review: myrepo PR #99 (issue #42)" in prompt
 
     def test_contem_instrucao_de_gh_issue_view(self) -> None:
         from deployment.deployment import _reviewer_prompt
@@ -902,7 +905,7 @@ class TestReviewerPrompt:
 
         prompt = _reviewer_prompt("eliasrosa/kirocrew-flow", pr_number=5, issue_number=70)
 
-        assert "SESSION TITLE: review: kirocrew-flow PR #5 (issue #70)" in prompt
+        assert "# review: kirocrew-flow PR #5 (issue #70)" in prompt
 
     def test_instrui_postar_no_pr_via_gh_pr_comment(self) -> None:
         """O prompt manda postar o resultado NO PR (passo 7) e NA ISSUE (passo 8).
@@ -962,10 +965,10 @@ class TestReviewerPrompt:
 
         prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
 
-        assert "REPO: owner/myrepo" in prompt
-        assert "PR: #99" in prompt
-        assert "ISSUE: #42" in prompt
-        assert "SESSION TITLE: review: myrepo PR #99 (issue #42)" in prompt
+        assert "| Repo | `owner/myrepo` |" in prompt
+        assert "| PR | #99 |" in prompt
+        assert "| Issue | #42 |" in prompt
+        assert "# review: myrepo PR #99 (issue #42)" in prompt
         assert "gh issue view 42 --repo owner/myrepo" in prompt
         assert "gh pr diff 99 --repo owner/myrepo" in prompt
         assert "crewflow:reviewed" in prompt
