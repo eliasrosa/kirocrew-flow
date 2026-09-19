@@ -651,12 +651,12 @@ def _resource_headroom_ok(ctx: object, max_concurrent: int) -> bool:
 # não existe no disco (apagado, corrompido, ou deploy sem o diretório).
 # É exatamente o conteúdo canônico que o template MD versiona.
 _DEV_PROMPT_FALLBACK = (
-    "------------ AGENT HEADER ----------------\n"
+    "## Agente\n"
     "REPO: {{repo}}\n"
     "ISSUE: #{{issue_number}} — {{issue_title}}\n"
     "URL: {{issue_url}}\n"
-    "SESSION TITLE: {{session_title}}\n"
-    "------------ CONTEXT TASK ----------------\n"
+    "SESSION TITLE: {{session_title}}\n\n"
+    "## Contexto da task\n"
     "Você é um agente de implementação ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.\n\n"
     "FLUXO (execute UMA vez, do início ao fim, e PARE):\n"
     "0. TÍTULO: como PRIMEIRA ação, defina o título da sessão = `SESSION TITLE`.\n"
@@ -692,8 +692,7 @@ _DEV_PROMPT_FALLBACK = (
     "REGRAS CRÍTICAS:\n"
     "- UMA passada. Terminou, acabou. NÃO entre em loop.\n"
     "- NUNCA mergeie. NUNCA faça deploy.\n"
-    "- Se bloquear, marque `crewflow:blocked`, avise, e pare.\n"
-    "------------------------------------------\n"
+    "- Se bloquear, marque `crewflow:blocked`, avise, e pare.\n\n"
     "{{prompt_extra}}"
 )
 
@@ -1774,13 +1773,13 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int, head_sha: str
     short = repo.split("/")[-1]
 
     _reviewer_fallback = (
-        "------------ AGENT HEADER ----------------\n"
+        "## Agente\n"
         "REPO: {{repo}}\n"
         "PR: #{{pr_number}}\n"
         "ISSUE: #{{issue_number}}\n"
         "HEAD SHA (no momento do dispatch): {{head_sha}}\n"
-        "SESSION TITLE: review: {{repo_short}} PR #{{pr_number}} (issue #{{issue_number}})\n"
-        "------------ CONTEXT TASK ----------------\n"
+        "SESSION TITLE: review: {{repo_short}} PR #{{pr_number}} (issue #{{issue_number}})\n\n"
+        "## Contexto da task\n"
         "Você é um agente de code review ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.\n\n"
         "FLUXO (execute UMA vez, do início ao fim, e PARE):\n"
         "0. TÍTULO: como PRIMEIRA ação, defina o título da sessão = `SESSION TITLE`.\n"
@@ -1838,8 +1837,7 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int, head_sha: str
         "- NUNCA mergeie. NUNCA faça deploy.\n"
         "- Seja objetivo — aponte problemas concretos, não estilo pessoal.\n"
         "- CI vermelho sempre bloqueia — mesmo que o código pareça correto.\n"
-        "- Resultado completo vai em DOIS lugares: PR (passo 7) e issue (passo 8).\n"
-        "------------------------------------------"
+        "- Resultado completo vai em DOIS lugares: PR (passo 7) e issue (passo 8)."
     )
 
     try:
@@ -1863,13 +1861,13 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int, head_sha: str
 
 
 _REWORK_PROMPT_FALLBACK = (
-    "------------ AGENT HEADER ----------------\n"
+    "## Agente\n"
     "REPO: {{repo}}\n"
     "ISSUE: #{{issue_number}} — {{issue_title}}\n"
     "PR: #{{pr_number}}\n"
     "URL: {{issue_url}}\n"
-    "SESSION TITLE: {{session_title}}\n"
-    "------------ CONTEXT TASK ----------------\n"
+    "SESSION TITLE: {{session_title}}\n\n"
+    "## Contexto da task\n"
     "Você é um agente de RE-TRABALHO pós-review ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.\n"
     "Seu único objetivo: aplicar os pedidos de mudança do reviewer na PR existente e devolver a issue para review.\n\n"
     "FLUXO (execute UMA vez, do início ao fim, e PARE):\n"
@@ -1913,8 +1911,7 @@ _REWORK_PROMPT_FALLBACK = (
     "- NUNCA mergeie. NUNCA faça deploy.\n"
     "- NUNCA abra PR novo — use a branch feat/issue-{{issue_number}} existente.\n"
     "- Aplique APENAS os pedidos explícitos do reviewer. Nada além.\n"
-    "- Se bloquear, marque `crewflow:blocked`, avise, e pare.\n"
-    "------------------------------------------\n"
+    "- Se bloquear, marque `crewflow:blocked`, avise, e pare.\n\n"
     "{{prompt_extra}}"
 )
 
@@ -2058,13 +2055,13 @@ def _conflict_resolver_has_active(repo: str, issue_number: int) -> bool:
 # Fallback embutido para o prompt do conflict resolver — usado quando
 # flow/prompts/conflict.md não existe no disco.
 _CONFLICT_PROMPT_FALLBACK = (
-    "------------ AGENT HEADER ----------------\n"
+    "## Agente\n"
     "REPO: {{repo}}\n"
     "ISSUE: #{{issue_number}} — {{issue_title}}\n"
     "PR: #{{pr_number}}\n"
     "URL: {{issue_url}}\n"
-    "SESSION TITLE: {{session_title}}\n"
-    "------------ CONTEXT TASK ----------------\n"
+    "SESSION TITLE: {{session_title}}\n\n"
+    "## Contexto da task\n"
     "Você é um agente de RESOLUÇÃO DE CONFLITO ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.\n\n"
     "USE O WORKTREE E BRANCH EXISTENTES — NÃO crie branch nova, NÃO abra PR novo.\n"
     "  `cd {{worktree_path}}`\n"
@@ -2075,8 +2072,7 @@ _CONFLICT_PROMPT_FALLBACK = (
     "  Resolva conflitos manualmente se necessário, depois:\n"
     "  `git push origin feat/issue-{{issue_number}} --force-with-lease`\n\n"
     "Remove `crewflow:conflito` e `crewflow:running` da issue.\n"
-    "NUNCA mergeie. NUNCA faça deploy. NUNCA abra PR novo.\n"
-    "------------------------------------------\n"
+    "NUNCA mergeie. NUNCA faça deploy. NUNCA abra PR novo.\n\n"
     "{{prompt_extra}}"
 )
 
