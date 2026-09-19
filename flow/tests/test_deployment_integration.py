@@ -27,8 +27,12 @@ from deployment.deployment import _load_config, _scan_result_to_issue, run  # no
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _minimal_config(repos: list[str] | None = None, auto: bool = False) -> dict:
-    return {
+def _minimal_config(
+    repos: list[str] | None = None,
+    auto: bool = False,
+    auto_merge_on_approve: bool = False,
+) -> dict:
+    cfg: dict = {
         "repos": repos or ["owner/repo"],
         "auto_dispatch": auto,
         "max_concurrent": 2,
@@ -39,6 +43,9 @@ def _minimal_config(repos: list[str] | None = None, auto: bool = False) -> dict:
         "dev_root": "/tmp/dev",
         "agent": "kirocrew",
     }
+    if auto_merge_on_approve:
+        cfg["workflow_params"] = {"auto_merge_on_approve": True}
+    return cfg
 
 
 def _make_scan_result(key: str = "https://github.com/owner/repo/issues/42",
@@ -311,7 +318,7 @@ class TestAutoMergeIntegration:
 
         with (
             mock.patch("deployment.deployment._load_config",
-                       return_value=_minimal_config(auto=True)),
+                       return_value=_minimal_config(auto=True, auto_merge_on_approve=True)),
             mock.patch("deployment.deployment.scan_candidates",
                        return_value=[result]),
             mock.patch("deployment.deployment.open_cache") as mock_cache,

@@ -240,7 +240,21 @@ class TestNotifyHumanAddsChangesRequested:
         assert "crewflow:reviewed" in d.remove_labels
 
     def test_aprovado_sem_comentarios_nao_adiciona_changes_requested(self) -> None:
-        """Reviewer aprovado sem comentários: MERGE_PR (caminho feliz, sem changes-requested)."""
+        """Reviewer aprovado sem comentários: caminho feliz, sem changes-requested.
+
+        Com auto_merge_on_approve ligado → MERGE_PR. O ponto do teste é que
+        aprovado-sem-comentários NUNCA vira changes-requested.
+        """
+        from flow.config.squad import SquadConfig, WorkflowParams
+        squad = SquadConfig(
+            id="test",
+            name="test",
+            issue_provider="github",
+            projects=["owner/repo"],
+            repos=frozenset({"repo", "owner/repo"}),
+            workflow_template="versao-c",
+            workflow_params=WorkflowParams(auto_merge_on_approve=True),
+        )
         sc = StateComment(workflow="f", current_node="review", status="reviewed", repo="r")
         sc.set_reviewer_result(approved=True, comments=[], sha="abc123")
         state_comment = render(sc)
@@ -249,7 +263,7 @@ class TestNotifyHumanAddsChangesRequested:
             labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
             modifiers={Modifier.REVIEWED},
         )
-        d = decide(r, state_comment=state_comment)
+        d = decide(r, state_comment=state_comment, squad=squad)
         assert d.action is ActionKind.MERGE_PR
         assert "crewflow:changes-requested" not in d.add_labels
 

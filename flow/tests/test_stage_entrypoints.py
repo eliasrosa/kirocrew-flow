@@ -403,7 +403,8 @@ class TestRunMerge:
 
         with (
             mock.patch("deployment.deployment._load_config",
-                       return_value=_base_config()),
+                       return_value=_base_config(
+                           workflow_params={"auto_merge_on_approve": True})),
             mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
             mock.patch("deployment.deployment.open_cache") as mock_cache,
             mock.patch("deployment.deployment.provider_for") as mock_pf,

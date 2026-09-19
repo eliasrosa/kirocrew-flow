@@ -306,6 +306,22 @@ class TestDecideComSquadConfig:
 class TestGate2AutoMerge:
     """Testa os 3 caminhos do GATE 2 (reviewer + merge automático)."""
 
+    def _squad(self, auto_merge_on_approve: bool) -> object:
+        """SquadConfig com a flag auto_merge_on_approve no valor pedido."""
+        from flow.config.squad import (
+            SquadConfig,
+            WorkflowParams,
+        )
+        return SquadConfig(
+            id="test",
+            name="test",
+            issue_provider="github",
+            projects=["owner/repo"],
+            repos=frozenset({"repo", "owner/repo"}),
+            workflow_template="versao-c",
+            workflow_params=WorkflowParams(auto_merge_on_approve=auto_merge_on_approve),
+        )
+
     def _make_review_result(
         self,
         approved: bool = True,
@@ -338,18 +354,51 @@ class TestGate2AutoMerge:
         assert "ainda não disponível" in d.reason
 
     def test_review_com_reviewed_aprovado_sem_comentarios_merge(self) -> None:
-        """Reviewer aprovado, zero comentários → MERGE_PR (caminho feliz)."""
+        """Flag ON + reviewer aprovado, zero comentários → MERGE_PR (caminho feliz)."""
         state_comment = self._make_review_result(approved=True, comments=[])
         r = _result(
             state=State.REVIEW,
             labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
             modifiers={Modifier.REVIEWED},
         )
-        d = decide(r, state_comment=state_comment)
+        d = decide(r, state_comment=state_comment, squad=self._squad(auto_merge_on_approve=True))
         assert d.action is ActionKind.MERGE_PR
         assert "crewflow:done" in d.add_labels
         assert "crewflow:review" in d.remove_labels
         assert "crewflow:reviewed" in d.remove_labels
+
+    def test_flag_off_aprovado_para_em_reviewed(self) -> None:
+        """Flag OFF (squad explícita) + aprovado → NÃO faz merge: para em reviewed."""
+        state_comment = self._make_review_result(approved=True, comments=[])
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
+            modifiers={Modifier.REVIEWED},
+        )
+        d = decide(r, state_comment=state_comment, squad=self._squad(auto_merge_on_approve=False))
+        assert d.action is not ActionKind.MERGE_PR
+        assert d.action is ActionKind.SKIP
+        # crewflow:reviewed permanece; review NÃO é removido; done NÃO é adicionado.
+        assert "crewflow:reviewed" in d.add_labels
+        assert "crewflow:review" not in d.remove_labels
+        assert "crewflow:done" not in d.add_labels
+        assert "merge manual" in d.reason
+
+    def test_squad_none_aprovado_para_em_reviewed(self) -> None:
+        """squad=None (default manual) + aprovado → NÃO faz merge: para em reviewed."""
+        state_comment = self._make_review_result(approved=True, comments=[])
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
+            modifiers={Modifier.REVIEWED},
+        )
+        d = decide(r, state_comment=state_comment, squad=None)
+        assert d.action is not ActionKind.MERGE_PR
+        assert d.action is ActionKind.SKIP
+        assert "crewflow:reviewed" in d.add_labels
+        assert "crewflow:review" not in d.remove_labels
+        assert "crewflow:done" not in d.add_labels
+        assert "merge manual" in d.reason
 
     def test_review_com_reviewed_aprovado_com_comentarios_notifica_tl(self) -> None:
         """Reviewer aprovado mas com comentários → NOTIFY_HUMAN TL."""
@@ -393,14 +442,14 @@ class TestGate2AutoMerge:
         assert "crewflow:reviewed" in d.add_labels
 
     def test_merge_pr_labels_corretas(self) -> None:
-        """MERGE_PR deve adicionar done e remover review+reviewed."""
+        """Flag ON: MERGE_PR deve adicionar done e remover review+reviewed."""
         state_comment = self._make_review_result(approved=True, comments=[])
         r = _result(
             state=State.REVIEW,
             labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
             modifiers={Modifier.REVIEWED},
         )
-        d = decide(r, state_comment=state_comment)
+        d = decide(r, state_comment=state_comment, squad=self._squad(auto_merge_on_approve=True))
         assert d.action is ActionKind.MERGE_PR
         assert set(d.add_labels) == {"crewflow:done"}
         assert "crewflow:review" in d.remove_labels
@@ -441,7 +490,12 @@ class TestGate2AutoMerge:
             modifiers={Modifier.REVIEWED},
         )
         # Mesmo prefixo de 8 chars — SHA completo do PR pode ser maior
-        d = decide(r, state_comment=state_comment, pr_head_sha="abc12345xyz")
+        d = decide(
+            r,
+            state_comment=state_comment,
+            pr_head_sha="abc12345xyz",
+            squad=self._squad(auto_merge_on_approve=True),
+        )
         assert d.action is ActionKind.MERGE_PR
 
     def test_sha_ausente_no_reviewer_nao_bloqueia(self) -> None:
@@ -462,7 +516,12 @@ class TestGate2AutoMerge:
             labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
             modifiers={Modifier.REVIEWED},
         )
-        d = decide(r, state_comment=state_comment, pr_head_sha="newsha123")
+        d = decide(
+            r,
+            state_comment=state_comment,
+            pr_head_sha="newsha123",
+            squad=self._squad(auto_merge_on_approve=True),
+        )
         assert d.action is ActionKind.MERGE_PR  # sem SHA do reviewer → não bloqueia
 
     def test_pr_head_sha_ausente_nao_bloqueia(self) -> None:
@@ -473,5 +532,10 @@ class TestGate2AutoMerge:
             labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
             modifiers={Modifier.REVIEWED},
         )
-        d = decide(r, state_comment=state_comment, pr_head_sha=None)
+        d = decide(
+            r,
+            state_comment=state_comment,
+            pr_head_sha=None,
+            squad=self._squad(auto_merge_on_approve=True),
+        )
         assert d.action is ActionKind.MERGE_PR  # sem SHA do PR → não bloqueia

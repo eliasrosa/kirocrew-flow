@@ -143,6 +143,23 @@ class TestParseSquad:
         sc = _parse_squad(d)
         assert sc.workflow_params.allow_hml_bypass is False
 
+    def test_auto_merge_on_approve_default_false(self) -> None:
+        """Ausente → False (default manual, auto-merge é opt-in explícito)."""
+        sc = _parse_squad(_minimal_squad_dict())
+        assert sc.workflow_params.auto_merge_on_approve is False
+
+    def test_auto_merge_on_approve_true(self) -> None:
+        d = _minimal_squad_dict()
+        d["workflow_params"] = {"auto_merge_on_approve": True}
+        sc = _parse_squad(d)
+        assert sc.workflow_params.auto_merge_on_approve is True
+
+    def test_auto_merge_on_approve_false_explicito(self) -> None:
+        d = _minimal_squad_dict()
+        d["workflow_params"] = {"auto_merge_on_approve": False}
+        sc = _parse_squad(d)
+        assert sc.workflow_params.auto_merge_on_approve is False
+
     def test_repos_normalizados(self) -> None:
         sc = _parse_squad(_minimal_squad_dict())
         # api-gateway2 (sem org) deve estar nos repos

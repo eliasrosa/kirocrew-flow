@@ -283,11 +283,24 @@ def decide(
             )
 
         if reviewer_result.is_auto_mergeable:
+            # Auto-merge é opt-in por squad (auto_merge_on_approve). Quando ligado,
+            # aprovado + zero comentários → MERGE_PR. Quando desligado/ausente (ou
+            # squad=None), o motor aplica crewflow:reviewed e PARA, aguardando merge
+            # manual — default seguro.
+            if _auto_merge_enabled(squad):
+                return ExecutorDecision(
+                    action=ActionKind.MERGE_PR,
+                    reason="reviewer aprovado sem pedidos de mudança — merge squash automático",
+                    add_labels=("crewflow:done",),
+                    remove_labels=("crewflow:review", "crewflow:reviewed"),
+                )
             return ExecutorDecision(
-                action=ActionKind.MERGE_PR,
-                reason="reviewer aprovado sem pedidos de mudança — merge squash automático",
-                add_labels=("crewflow:done",),
-                remove_labels=("crewflow:review", "crewflow:reviewed"),
+                action=ActionKind.SKIP,
+                reason=(
+                    "auto_merge_on_approve desligado — aprovado, aplicando "
+                    "crewflow:reviewed e aguardando merge manual"
+                ),
+                add_labels=("crewflow:reviewed",),
             )
 
         # Reviewer tem comentários — marca changes-requested para disparar re-trabalho
@@ -410,6 +423,19 @@ def _decide_by_state(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _auto_merge_enabled(squad: object | None) -> bool:
+    """Retorna se o auto-merge está ligado para a squad.
+
+    Lê ``squad.workflow_params.auto_merge_on_approve``. Default (squad=None ou
+    flag ausente/False) = False = merge manual — auto-merge é opt-in explícito.
+    """
+    if squad is None:
+        return False
+    from flow.config.squad import SquadConfig
+    sq: SquadConfig = squad  # type: ignore[assignment]
+    return bool(sq.workflow_params.auto_merge_on_approve)
+
 
 def _has_equivalence_test_signal(state_comment: str | None) -> bool:
     """Verifica se o comentário de estado sinaliza teste de equivalência."""

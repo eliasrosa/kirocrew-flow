@@ -39,6 +39,11 @@ class RoutingRule:
 class WorkflowParams:
     """Parâmetros configuráveis do template de workflow."""
     merge_mode: str = "manual"        # "manual" | "auto" (futuro)
+    # auto_merge_on_approve: aprovou com CI verde + zero comentários → merge
+    # automático (MERGE_PR). Default False = merge manual; auto-merge é opt-in
+    # explícito por squad (mais seguro para POC). Quando False/ausente, o motor
+    # aplica crewflow:reviewed e para, aguardando merge manual.
+    auto_merge_on_approve: bool = False
     review_position: str = "before_qa"  # Versão C: before_qa | after_qa | parallel_qa
     deploy_hml_mode: str = "manual"   # "manual" | "auto" (futuro)
     allow_hml_bypass: bool = True     # hotfix pode ir direto pra PRD
@@ -133,6 +138,7 @@ def _parse_squad(raw: dict[str, Any], source: str = "<dict>") -> SquadConfig:
     raw_params = raw.get("workflow_params") or {}
     params = WorkflowParams(
         merge_mode=raw_params.get("merge_mode", "manual"),
+        auto_merge_on_approve=bool(raw_params.get("auto_merge_on_approve", False)),
         review_position=raw_params.get("review_position", "before_qa"),
         deploy_hml_mode=raw_params.get("deploy_hml_mode", "manual"),
         allow_hml_bypass=bool(raw_params.get("allow_hml_bypass", True)),

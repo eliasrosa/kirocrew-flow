@@ -30,8 +30,12 @@ workflow_template: versao-c
 # Parâmetros do template configuráveis por squad
 workflow_params:
   # merge_mode: "manual" (único valor implementado na Fase 1)
-  # auto-merge é item futuro — o motor nunca mergeia
   merge_mode: manual
+  # auto_merge_on_approve: liga/desliga o merge automático por squad.
+  #   true          = aprovou (CI verde + zero comentários) → merge squash automático
+  #   false/ausente = aplica crewflow:reviewed e para, aguardando merge manual
+  #   default = false — auto-merge é opt-in explícito (mais seguro para POC)
+  auto_merge_on_approve: false
   # review_position: before_qa | after_qa | parallel_qa
   review_position: before_qa
   # deploy_hml_mode: "manual" (único valor implementado na Fase 1)

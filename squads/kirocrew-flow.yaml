@@ -12,6 +12,8 @@ workflow_template: versao-c
 
 workflow_params:
   merge_mode: manual
+  # Este repo mantém merge manual por padrão (default seguro da POC).
+  auto_merge_on_approve: false
   review_position: before_qa
   deploy_hml_mode: manual
   allow_hml_bypass: true

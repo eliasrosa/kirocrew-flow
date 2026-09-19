@@ -1,7 +1,7 @@
 ---
 inclusion: always
 name: fluxo-esteira
-description: Fluxo de desenvolvimento do KiroCrew Flow — da especificação ao merge, governado por labels crewflow:*, com motor de execução one-shot sobre o Kiro Crew. Merge sempre manual.
+description: Fluxo de desenvolvimento do KiroCrew Flow — da especificação ao merge, governado por labels crewflow:*, com motor de execução one-shot sobre o Kiro Crew. Merge manual por padrão; auto-merge no approve é opt-in por squad (auto_merge_on_approve).
 ---
 
 # Fluxo da esteira (KiroCrew Flow)
@@ -11,9 +11,11 @@ zero-token observa issues por label `crewflow:*` e, quando uma task está
 priorizada, dispara uma **sessão de execução one-shot** que implementa e **abre o
 PR** — uma passada, sem loop.
 
-> **Regra inviolável: a automação NUNCA mergeia e NUNCA faz deploy.** Ela entrega
-> o PR no estado `crewflow:review` e encerra. Merge e deploy são sempre manuais.
-> Auto-merge opcional por squad está no radar (futuro), não na Fase 1.
+> **Regra: por padrão a automação NUNCA mergeia e NUNCA faz deploy.** Ela entrega
+> o PR no estado `crewflow:review` e encerra; deploy é sempre manual. O merge no
+> approve é **opt-in por squad** via `auto_merge_on_approve` (default `false`):
+> ligado, aprovado (CI verde + zero comentários) faz merge squash automático;
+> desligado/ausente, aplica `crewflow:reviewed` e para, aguardando merge manual.
 
 ## Fluxograma — Versão C (oficial: review ANTES do QA, sequencial)
 
@@ -46,6 +48,10 @@ flowchart TD
     class C,D,E,R,BOT,I auto
     class G0,G1,G2 gate
 ```
+
+> **Merge:** o nó "MERGE MANUAL" reflete o default (`auto_merge_on_approve: false`).
+> Com a flag ligada na squad, o approve (CI verde + zero comentários) faz merge
+> squash automático em vez de parar em `crewflow:reviewed`.
 
 ## Labels — duas dimensões
 
@@ -119,7 +125,7 @@ Em vez de um único cron monolítico (`run`), a esteira pode ser dividida em
 |---|---|---|---|
 | `run_dev` | `crewflow:todo` | `DISPATCH_DEV` — implementa + abre PR | 600s (10 min) |
 | `run_reviewer` | `crewflow:review` (sem `crewflow:reviewed`) | `DISPATCH_REVIEWER` — code review | 300s (5 min) |
-| `run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | `MERGE_PR` — merge squash | 120s (2 min) |
+| `run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | `MERGE_PR` — merge squash (só quando `auto_merge_on_approve` ligado; senão para em `reviewed` p/ merge manual) | 120s (2 min) |
 | `run_rework` | `crewflow:changes-requested` | `DISPATCH_REWORK` — re-trabalho pós-review | 300s (5 min) |
 | `run_conflito` | `crewflow:conflito` | `DISPATCH_CONFLICT_RESOLVER` — resolve conflito de merge | 300s (5 min) |
 
@@ -142,12 +148,19 @@ Uma análise por SHA. O robô de review adiciona `crewflow:reviewed` depois de
 comentar. Se a label já está lá, o executor ignora a issue. Quando o dev faz um
 novo push, a label é removida e a próxima varredura dispara nova análise.
 
+Quando o reviewer aprova (CI verde + zero comentários), o comportamento depende
+de `auto_merge_on_approve` na squad: **ligado** → `MERGE_PR` (merge squash + `crewflow:done`);
+**desligado/ausente (default)** → o fluxo permanece em `crewflow:reviewed`,
+aguardando merge manual (não remove `crewflow:review`, não adiciona `crewflow:done`).
+
 ## Travas de segurança
 
 - `auto_dispatch=false` por padrão (só avisa até você confiar).
 - `max_concurrent` (default 2) e **1 sessão por repo**.
 - `max_turns_per_task` — teto duro por sessão.
 - Worktree isolado + ordem de nunca tocar outros worktrees/branches.
-- **Nenhum merge e nenhum deploy automatizados** — trava de produto, não de config.
+- **Merge manual por padrão; deploy nunca automatizado.** O auto-merge no approve
+  é opt-in explícito por squad (`auto_merge_on_approve`, default `false`); sem ele,
+  o fluxo para em `crewflow:reviewed` aguardando merge manual.
 
 > Depende do Kiro Crew rodando — é uma receita/plugin, não um app standalone.
