@@ -294,10 +294,14 @@ def decide(
                     f"vs reviewer SHA={reviewer_result.sha[:8]} — re-revisão necessária"
                 ),
                 # Limpa o lock anti-loop: o crewflow:reviewed do resultado
-                # obsoleto é REMOVIDO e NÃO re-adicionado, para que o próximo
-                # scan re-despache o reviewer contra o HEAD atual (o ciclo de
-                # dispatch re-aplica crewflow:reviewed). Re-adicionar aqui seria
-                # um no-op contraditório e manteria o falso negativo.
+                # obsoleto é REMOVIDO e NÃO re-adicionado. O driving adapter
+                # (deployment.py) aplica este remove_labels via provider.set_labels
+                # antes de re-despachar o reviewer, para que a issue volte ao estado
+                # crewflow:review "limpo". O crewflow:reviewed só será re-aplicado
+                # pela SESSÃO do reviewer (passo 10 do prompt), e somente se a nova
+                # análise contra o HEAD atual aprovar — não pelo ciclo de dispatch.
+                # Re-adicionar aqui seria um no-op contraditório e manteria o falso
+                # negativo.
                 remove_labels=("crewflow:reviewed",),
             )
 

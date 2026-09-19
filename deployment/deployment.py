@@ -725,7 +725,8 @@ def _dry_run_report(
     for repo, issue, decision in dispatch_devs:
         print(f"[DRY-RUN] {repo}#{issue['number']} → DISPATCH_DEV (template via executor) — {issue['title']}")
 
-    for repo, issue in dispatch_reviewers:
+    for _dr in dispatch_reviewers:
+        repo, issue = _dr[0], _dr[1]
         print(f"[DRY-RUN] {repo}#{issue['number']} → DISPATCH_REVIEWER — {issue['title']}")
 
     for repo, issue, _sc in dispatch_reworks:
@@ -925,7 +926,7 @@ def run(ctx: object) -> None:
     # Categorias de resultado após o executor — tipadas para mypy
     spec_invalid: list[ScanResult] = []
     dispatch_devs: list[tuple[str, dict, object]] = []   # (repo, issue, decision)
-    dispatch_reviewers: list[tuple[str, dict]] = []      # (repo, issue)
+    dispatch_reviewers: list[tuple[str, dict, object, list[str]]] = []  # (repo, issue, decision, current_labels)
     dispatch_reworks: list[tuple[str, dict, str | None]] = []  # (repo, issue, state_comment)
     conflict_resolvers: list[tuple[str, dict]] = []      # (repo, issue) — cron de conflito
     mark_conflitos: list[ScanResult] = []                # issues para marcar crewflow:conflito
@@ -1024,7 +1025,7 @@ def run(ctx: object) -> None:
         elif decision.action is ActionKind.DISPATCH_REVIEWER:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             issue = _scan_result_to_issue(result)
-            dispatch_reviewers.append((repo, issue))
+            dispatch_reviewers.append((repo, issue, decision, list(result.item.labels)))
         elif decision.action is ActionKind.MERGE_PR:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             issue = _scan_result_to_issue(result)
@@ -1264,7 +1265,7 @@ def run(ctx: object) -> None:
                 logger.info("deployment: labels atualizadas para %s: +%s -%s", _key, list(_add), list(_remove))
 
     if dispatch_reviewers:
-        for repo, issue in dispatch_reviewers:
+        for repo, issue, _rv_decision, _rv_labels in dispatch_reviewers:
             issue_number = issue["number"]
             if _reviewer_has_active(repo, issue_number):
                 logger.info(
@@ -1272,6 +1273,13 @@ def run(ctx: object) -> None:
                     repo, issue_number,
                 )
                 continue
+            # Aplica as mudanças de label da decisão ANTES de re-despachar o
+            # reviewer. No caminho de divergência de SHA, decide() devolve
+            # remove_labels=("crewflow:reviewed",): limpar esse lock aqui garante
+            # que a issue volte ao estado crewflow:review "limpo" para a nova
+            # análise contra o HEAD atual (mesmo padrão dos loops dispatch_devs/
+            # needs_human).
+            _apply_reviewer_decision_labels(provider, issue.get("url", ""), _rv_labels, _rv_decision)
             try:
                 _dispatch_reviewer(ctx, repo, issue, cfg)
             except Exception as exc:
@@ -1999,6 +2007,43 @@ def _dispatch_conflict_resolver(
         )
 
 
+def _apply_reviewer_decision_labels(
+    provider: object,
+    issue_key: str,
+    current_labels: list[str],
+    decision: object,
+) -> None:
+    """Aplica remove_labels/add_labels de uma decisão de reviewer via provider.set_labels.
+
+    Espelha o padrão dos loops dispatch_devs/needs_human: as decisões do executor
+    (ex.: DISPATCH_REVIEWER no caminho de divergência de SHA) carregam labels a
+    aplicar, mas os loops de dispatch de reviewer historicamente as descartavam —
+    deixando o lock crewflow:reviewed preso na issue. Este helper reintroduz a
+    aplicação para que o lock obsoleto seja efetivamente removido antes da
+    re-análise. Fail-closed: qualquer erro de I/O é engolido (não deve bloquear o
+    dispatch), assim como nos demais loops.
+    """
+    _add = getattr(decision, "add_labels", ()) or ()
+    _remove = getattr(decision, "remove_labels", ()) or ()
+    if (not _add and not _remove) or not issue_key:
+        return
+    import contextlib
+    with contextlib.suppress(Exception):
+        _repo_lbl = issue_key.split("/issues/")[0].replace("https://github.com/", "")
+        labels = list(current_labels)
+        for lbl in _remove:
+            if lbl in labels:
+                labels.remove(lbl)
+        for lbl in _add:
+            if lbl not in labels:
+                labels.append(lbl)
+        provider.set_labels(_repo_lbl, issue_key, labels)  # type: ignore[attr-defined]
+        logger.info(
+            "deployment: labels do reviewer atualizadas para %s: +%s -%s",
+            issue_key, list(_add), list(_remove),
+        )
+
+
 def _dispatch_reviewer(
     ctx: object,
     repo: str,
@@ -2539,7 +2584,7 @@ def _run_stage(ctx: object, stage: str) -> None:
         elif decision.action is ActionKind.DISPATCH_REVIEWER:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             issue = _scan_result_to_issue(result)
-            dispatch_reviewers.append((repo, issue))
+            dispatch_reviewers.append((repo, issue, decision, list(result.item.labels)))
 
         elif decision.action is ActionKind.MERGE_PR:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
@@ -2693,7 +2738,7 @@ def _run_stage(ctx: object, stage: str) -> None:
             )
 
     elif stage == _STAGE_REVIEWER:
-        for repo, issue in dispatch_reviewers:
+        for repo, issue, _rv_decision, _rv_labels in dispatch_reviewers:
             issue_number = issue["number"]
             if _reviewer_has_active(repo, issue_number):
                 logger.info(
@@ -2701,6 +2746,11 @@ def _run_stage(ctx: object, stage: str) -> None:
                     repo, issue_number,
                 )
                 continue
+            # Aplica as mudanças de label da decisão ANTES de re-despachar (mesmo
+            # padrão do run()): no caminho de divergência de SHA, isso limpa o
+            # lock crewflow:reviewed obsoleto para que a issue volte ao estado
+            # crewflow:review "limpo" antes da nova análise.
+            _apply_reviewer_decision_labels(provider, issue.get("url", ""), _rv_labels, _rv_decision)
             try:
                 _dispatch_reviewer(ctx, repo, issue, cfg)
             except Exception as exc:

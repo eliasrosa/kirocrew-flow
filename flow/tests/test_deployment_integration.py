@@ -1018,6 +1018,114 @@ class TestRunDispatchReviewer:
 
         mock_disp_rev.assert_not_called()
 
+    def _make_diverged_review_scan_result(self) -> tuple[object, str]:
+        """ScanResult em review+reviewed cujo ReviewerResult.sha != HEAD atual do PR.
+
+        Simula uma PR que avançou após o dispatch do reviewer: o reviewer
+        registrou sha=abc123, mas o HEAD atual é outro (push pós-review).
+        """
+        from flow.audit.state_comment import StateComment, render
+        from flow.domain.gates import WorkItem
+        from flow.domain.state import Modifier, State
+        from flow.scan.scanner import ScanResult
+
+        sc = StateComment(
+            workflow="feature (v1)", current_node="review",
+            status="reviewed", repo="owner/repo",
+        )
+        # Reviewer aprovou contra o commit antigo abc123.
+        sc.set_reviewer_result(approved=True, comments=[], sha="abc123")
+        state_body = render(sc)
+
+        result = ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/repo/issues/42",
+                title="[owner/repo] Feature X",
+                labels=frozenset(["crewflow:review", "crewflow:reviewed", "crewflow:feature"]),
+            ),
+            current_state=State.REVIEW,
+            modifiers=frozenset([Modifier.REVIEWED]),
+            dispatch_candidate=False,
+            spec_valid=None,
+            changed=True,
+            reason="reviewer aprovado contra SHA antigo",
+        )
+        return result, state_body
+
+    def test_sha_divergente_redespacha_reviewer_e_limpa_lock(self) -> None:
+        """E2E: PR que avançou após o dispatch é re-revisada no commit novo.
+
+        Quando o HEAD atual do PR difere do ReviewerResult.sha armazenado, run()
+        deve (a) re-despachar o reviewer e (b) limpar o lock crewflow:reviewed via
+        provider.set_labels — provando que o remove_labels da decisão de divergência
+        realmente chega ao GitHub (não é mais um dead write).
+
+        Revert-sensível: se o wiring do remove_labels quebrar, a asserção de
+        set_labels falha; se a re-dispatch quebrar, a asserção de _dispatch_reviewer
+        falha.
+        """
+        ctx = self._make_ctx()
+        result, state_body = self._make_diverged_review_scan_result()
+
+        # HEAD atual do PR diverge do sha registrado pelo reviewer (abc123).
+        fake_pr = {
+            "number": 99, "title": "feat: Feature X",
+            "headRefName": "feat/issue-42", "headRefOid": "deadbeef99",
+            "body": "Closes #42", "mergeable": "MERGEABLE",
+        }
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value={
+                           "repos": ["owner/repo"],
+                           "auto_dispatch": True,
+                           "max_concurrent": 2,
+                           "one_per_repo": True,
+                           "notify_chat_id": "",
+                           "squad_id": "test",
+                           "issue_provider": "github",
+                           "dev_root": "/tmp/dev",
+                           "agent": "kirocrew",
+                       }),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_provider_for,
+            mock.patch("deployment.deployment._reviewer_has_active", return_value=False),
+            mock.patch("deployment.deployment._dispatch_reviewer") as mock_disp_rev,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_state_comment.return_value = state_body
+            mock_provider.get_pr_for_issue = mock.MagicMock(return_value=fake_pr)
+            mock_provider_for.return_value = mock_provider
+
+            run(ctx)
+
+        # (a) o reviewer foi re-despachado contra o HEAD novo
+        mock_disp_rev.assert_called_once()
+        call_args = mock_disp_rev.call_args
+        assert call_args[0][1] == "owner/repo"
+        assert call_args[0][2]["number"] == 42
+
+        # (b) o lock crewflow:reviewed foi efetivamente removido via set_labels
+        set_labels_calls = mock_provider.set_labels.call_args_list
+        assert set_labels_calls, (
+            "esperava provider.set_labels chamado para limpar o lock crewflow:reviewed"
+        )
+        # Encontra a chamada que aplicou os labels da issue 42
+        cleared = False
+        for c in set_labels_calls:
+            _args = c[0]
+            _labels = _args[2] if len(_args) >= 3 else c[1].get("labels", [])
+            if "issues/42" in str(_args) and "crewflow:reviewed" not in _labels:
+                cleared = True
+                assert "crewflow:review" in _labels  # mantém o estado base
+        assert cleared, (
+            f"esperava set_labels removendo crewflow:reviewed da issue 42, got: {set_labels_calls}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # _post_reviewer_result_on_pr — posta resultado do reviewer no PR
