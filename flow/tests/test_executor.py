@@ -423,6 +423,27 @@ class TestGate2AutoMerge:
         assert "abc123" in d.reason    # SHA do reviewer (primeiros 8 chars)
         assert "deadbeef" in d.reason  # SHA do PR (primeiros 8 chars)
 
+    def test_sha_divergente_limpa_lock_reviewed(self) -> None:
+        """SHA divergente: o lock crewflow:reviewed é REMOVIDO e NÃO re-adicionado.
+
+        Prova que uma PR que avançou após o dispatch será re-revisada no commit
+        novo: limpar o lock faz o próximo scan re-despachar o reviewer contra o
+        HEAD atual. Re-adicionar crewflow:reviewed seria um no-op contraditório
+        que perpetuaria o falso negativo das PRs #97/#102/#109.
+        """
+        state_comment = self._make_review_result(approved=True, comments=[])
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
+            modifiers={Modifier.REVIEWED},
+        )
+        d = decide(r, state_comment=state_comment, pr_head_sha="deadbeef123")
+        assert d.action is ActionKind.DISPATCH_REVIEWER
+        # (b) remove o lock obsoleto
+        assert "crewflow:reviewed" in d.remove_labels
+        # (c) NÃO re-adiciona o lock (senão vira no-op contraditório)
+        assert "crewflow:reviewed" not in d.add_labels
+
     def test_sha_igual_prossegue_merge(self) -> None:
         """SHA do PR bate com o do reviewer (primeiros 8 chars) → merge prossegue."""
         from flow.audit.state_comment import StateComment, render

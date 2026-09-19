@@ -801,6 +801,45 @@ class TestReviewerPrompt:
         assert "gh issue comment" in prompt
         assert "mesmo corpo completo" in prompt.lower() or "mesmo corpo" in prompt
 
+    def test_reancora_no_head_atual(self) -> None:
+        """O prompt reancora a análise no HEAD atual do PR (fix do falso negativo).
+
+        Deve instruir a ler o headRefOid PRIMEIRO, re-buscar o `gh pr diff` do
+        HEAD atual e proibir confiar em diff pré-carregado do contexto do dispatch.
+        """
+        from deployment.deployment import _reviewer_prompt
+
+        prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        assert "--json headRefOid" in prompt
+        assert "gh pr diff 99 --repo owner/myrepo" in prompt
+        assert "NUNCA confie em um diff pré-carregado do contexto do dispatch" in prompt
+        assert "PRIMEIRO passo" in prompt
+        assert "registre o headRefOid lido" in prompt
+        # Ordem: lê headRefOid ANTES de re-buscar o diff
+        assert prompt.index("--json headRefOid") < prompt.index("gh pr diff 99 --repo owner/myrepo")
+
+    def test_fallback_embutido_carrega_diretiva_de_reancoragem(self) -> None:
+        """O fallback embutido (_reviewer_fallback) carrega a MESMA diretiva de reancoragem.
+
+        O fallback só é emitido quando o MD está ausente/ilegível. Forçamos esse
+        caminho fazendo o loader levantar FileNotFoundError, garantindo que a
+        cópia versionada embutida também reancora no HEAD atual e proíbe o diff
+        pré-carregado do contexto do dispatch.
+        """
+        from deployment.deployment import _reviewer_prompt
+        from flow.prompts import loader
+
+        with mock.patch.object(loader, "_load_template", side_effect=FileNotFoundError):
+            prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
+
+        assert "--json headRefOid" in prompt
+        assert "gh pr diff 99 --repo owner/myrepo" in prompt
+        assert "NUNCA confie em um diff pré-carregado do contexto do dispatch" in prompt
+        assert "PRIMEIRO passo" in prompt
+        assert "registre o headRefOid lido" in prompt
+        assert prompt.index("--json headRefOid") < prompt.index("gh pr diff 99 --repo owner/myrepo")
+
 
 class TestDispatchReviewerFunction:
     """_dispatch_reviewer faz POST /api/chat com o slot e prompt corretos."""

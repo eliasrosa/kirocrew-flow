@@ -293,7 +293,11 @@ def decide(
                     f"SHA divergiu após review: PR HEAD={pr_head_sha[:8]} "
                     f"vs reviewer SHA={reviewer_result.sha[:8]} — re-revisão necessária"
                 ),
-                add_labels=("crewflow:reviewed",),
+                # Limpa o lock anti-loop: o crewflow:reviewed do resultado
+                # obsoleto é REMOVIDO e NÃO re-adicionado, para que o próximo
+                # scan re-despache o reviewer contra o HEAD atual (o ciclo de
+                # dispatch re-aplica crewflow:reviewed). Re-adicionar aqui seria
+                # um no-op contraditório e manteria o falso negativo.
                 remove_labels=("crewflow:reviewed",),
             )
 

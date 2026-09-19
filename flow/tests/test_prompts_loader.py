@@ -289,6 +289,47 @@ class TestRealTemplates:
         assert "gh pr checks 5 --repo owner/myrepo" in result
         assert "CI" in result
 
+    def test_reviewer_template_reancora_no_head_atual(self) -> None:
+        """Passo 2: o reviewer deve reancorar no HEAD atual do PR.
+
+        Deve instruir a ler o headRefOid PRIMEIRO, re-buscar `gh pr diff` para
+        o HEAD atual como primeiro passo autoritativo, e proibir confiar em um
+        diff pré-carregado do contexto do dispatch (fix do falso negativo de SHA
+        antigo — PRs #97/#102/#109).
+        """
+        result = render_prompt(
+            "reviewer",
+            repo="owner/myrepo",
+            repo_short="myrepo",
+            pr_number="5",
+            issue_number="42",
+            example_approved="",
+            example_changes="",
+        )
+        # Lê o headRefOid do HEAD atual
+        assert "--json headRefOid" in result
+        # Re-busca o diff do HEAD atual
+        assert "gh pr diff 5 --repo owner/myrepo" in result
+        # Proíbe confiar em diff pré-carregado do contexto do dispatch
+        assert "NUNCA confie em um diff pré-carregado do contexto do dispatch" in result
+        # headRefOid deve ser lido como PRIMEIRO passo autoritativo
+        assert "PRIMEIRO passo" in result
+        # O headRefOid lido deve ir para o ReviewerResult (registrado)
+        assert "registre o headRefOid lido" in result
+
+    def test_reviewer_template_le_headrefoid_antes_do_diff(self) -> None:
+        """O headRefOid deve ser lido ANTES de re-buscar o diff (ordem importa)."""
+        result = render_prompt(
+            "reviewer",
+            repo="owner/myrepo",
+            repo_short="myrepo",
+            pr_number="5",
+            issue_number="42",
+            example_approved="",
+            example_changes="",
+        )
+        assert result.index("--json headRefOid") < result.index("gh pr diff 5 --repo owner/myrepo")
+
     def test_reviewer_template_ci_vermelho_bloqueia(self) -> None:
         """CI vermelho deve bloquear aprovação mesmo que o código esteja correto."""
         result = render_prompt(

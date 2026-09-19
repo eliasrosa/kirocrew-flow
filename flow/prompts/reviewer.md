@@ -11,11 +11,17 @@ FLUXO (execute UMA vez, do início ao fim, e PARE):
 1. Leia a issue para ter contexto, incluindo os comentários:
    gh issue view {{issue_number}} --repo {{repo}}
    gh issue view {{issue_number}} --repo {{repo}} --comments
-2. Leia o diff do PR e os comentários do PR:
-   gh pr diff {{pr_number}} --repo {{repo}}
-   gh pr view {{pr_number}} --repo {{repo}} --comments
-   Fixe o SHA atual do HEAD do PR (use este valor no ReviewerResult do passo 7):
-   gh pr view {{pr_number}} --repo {{repo}} --json headRefOid
+2. RE-ANCORE A ANÁLISE NO HEAD ATUAL DO PR — este é o PRIMEIRO passo autoritativo:
+   a) Leia PRIMEIRO o SHA atual do HEAD do PR e FIXE esse valor (use no ReviewerResult do passo 9):
+      gh pr view {{pr_number}} --repo {{repo}} --json headRefOid
+   b) Só então re-busque o diff do PR JÁ ANCORADO nesse HEAD atual:
+      gh pr diff {{pr_number}} --repo {{repo}}
+   c) Leia os comentários do PR:
+      gh pr view {{pr_number}} --repo {{repo}} --comments
+   NUNCA confie em um diff pré-carregado do contexto do dispatch — SEMPRE re-busque o
+   headRefOid e o `gh pr diff` do PR como PRIMEIRO passo, e registre o headRefOid lido.
+   O diff do contexto do dispatch pode estar desatualizado (a sessão de dev pode ter
+   commitado no HEAD novo depois do dispatch); analisar o SHA antigo gera falso negativo.
 3. Leia os steerings do repo (.kiro/steering/*.md) para entender convenções.
 4. Verifique o status da pipeline de CI do PR:
    gh pr checks {{pr_number}} --repo {{repo}} --json name,state,conclusion
