@@ -1,0 +1,25 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Environment setup and baseline confirmation. Install dev dependencies with Python 3.12 and confirm the existing test suite and lint are green before changing anything. This establishes the known-good baseline so later features can be verified against it. Independent prerequisite for all other features.",
+  "status": "completed",
+  "steps": [
+    "Confirm python3.12 is the interpreter to use (the default python3 is 3.9 and CANNOT run this code): python3.12 --version should report 3.12.x.",
+    "From /projects/sandbox/kirocrew-flow, install dev extras: python3.12 -m pip install -e '.[dev]'.",
+    "Run ruff: python3.12 -m ruff check flow/ — expect 'All checks passed!'.",
+    "Run the full suite: python3.12 -m pytest flow/tests/ -q — expect 569 passed, 1 failed. The single failure is flow/tests/test_prompts_loader.py::TestRenderPromptFallback::test_template_corrompido_ilegivel_usa_fallback and is environmental (it does chmod(0o000) which root ignores). Record this as the known baseline; do NOT attempt to fix it.",
+    "Note the git branch (main) and HEAD commit so later diffs are clear."
+  ],
+  "acceptance_criteria": [
+    "python3.12 -m pip install -e '.[dev]' completes without error",
+    "python3.12 -m ruff check flow/ reports all checks passed",
+    "python3.12 -m pytest flow/tests/ -q reports 569 passed and only the known root-permission test failing",
+    "findings field records the exact baseline counts and the known-failing test name"
+  ],
+  "verification": [
+    "python3.12 -m ruff check flow/",
+    "python3.12 -m pytest flow/tests/ -q"
+  ],
+  "blocked_reason": null,
+  "findings": "Baseline confirmed on branch main at HEAD 10283718e843d55e181dbd753c1a16923e3b712a. python3.12 --version = Python 3.12.13. `python3.12 -m pip install -e '.[dev]'` completed successfully (kirocrew-flow 0.1.0 editable rebuilt; all deps already satisfied; only a benign pip-as-root warning). `python3.12 -m ruff check flow/` = 'All checks passed!' (zero warnings). `python3.12 -m pytest flow/tests/ -q` = 1 failed, 569 passed, 8 warnings in ~2s. The single failure is the KNOWN environmental one: flow/tests/test_prompts_loader.py::TestRenderPromptFallback::test_template_corrompido_ilegivel_usa_fallback (chmod(0o000) is ignored by root, so the fallback branch is never triggered). This is the expected green baseline; it must NOT be 'fixed'. No source files were modified in this feature."
+}

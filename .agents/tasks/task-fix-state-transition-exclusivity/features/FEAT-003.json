@@ -1,0 +1,30 @@
+{
+  "id": "FEAT-003",
+  "type": "fix",
+  "description": "Wire the atomic transition into the driving adapter (deployment/deployment.py) so every state change goes through transition_state() and no issue can end with 2+ state labels, then add integration coverage for the todo->dev->review path. This fixes the live bug from issue #107 where an issue held crewflow:todo AND crewflow:review simultaneously. Depends on FEAT-002.",
+  "status": "pending",
+  "steps": [
+    "Study how deployment/deployment.py applies labels today: provider.set_labels(project, key, labels) REPLACES the full label set. The branches that currently edit labels are: rebrand (~line 1123: builds current_labels from result.item.labels, removes decision.remove_labels, extends decision.add_labels), needs_human (~line 1245: same hand-rolled add/remove), and mark_conflito (~line 1355: appends crewflow:conflito). The DISPATCH_DEV branch (~line 1040) fires _dispatch() but NEVER calls set_labels — the todo->dev and dev->review label changes are performed by the one-shot LLM session via gh, which is exactly where the old state fails to be removed.",
+    "Primary fix — DISPATCH_DEV (todo->dev): in the dev-dispatch loop in run()/the stage runner, after a successful _dispatch() (i.e. when a session is actually fired and auto_dispatch is on), apply the transition to crewflow:dev atomically via the provider so the issue leaves crewflow:todo immediately and deterministically instead of relying on the LLM. Build the new label set with transition_state(result.item.labels, State.DEV) then add crewflow:running (a modifier, preserved by transition_state) as the executor decision's add_labels indicate, and call provider.set_labels(repo, key, new_labels). Guard with contextlib.suppress/try-except and log, consistent with the existing branches, and respect dry_run (never call set_labels in dry-run). Make sure this does not double-dispatch or race the existing concurrency guards — only transition when the code path already committed to dispatching.",
+    "Harden the existing state-changing branches to route state labels through transition_state so exclusivity is guaranteed centrally rather than by ad-hoc list edits: wherever a decision's add_labels contains a crewflow state label (spec/ready/todo/dev/review/qa/done), compute the resulting labels with transition_state(base_labels, <that State>) and then apply the remaining modifier add/remove on top; wherever add_labels contains only modifiers (e.g. crewflow:conflito, crewflow:running, crewflow:changes-requested), keep the current add/remove behavior. A small local helper in deployment.py (e.g. _apply_decision_labels(base_labels, add_labels, remove_labels) -> list[str]) that (1) detects any state label in add_labels and applies transition_state for it, (2) then removes remove_labels, (3) then adds modifier/type labels, is a clean way to centralize this. Import transition_state and State from flow.domain.state.",
+    "Do NOT change the executor's decision contract (add_labels/remove_labels stay as-is). The transition enforcement belongs at the set_labels application boundary in deployment.py (and in the domain helper), so the executor stays pure and its existing tests keep passing.",
+    "Update flow/prompts/dev.md so the one-shot prompt instructs the agent, when opening the PR, to move to crewflow:review by REMOVING the previous state label in the same operation (e.g. gh issue edit --add-label crewflow:review --remove-label crewflow:dev --remove-label crewflow:todo) — reinforcing the 'exactly 1 state' invariant even on the LLM path. Keep the existing 'remova crewflow:running (mantenha crewflow:review)' instruction. Only edit the MD wording; the engine-side transition is the authoritative guard.",
+    "Add integration tests proving no state accumulation. In flow/tests/test_e2e_integration.py (which already builds a mock provider with set_labels mocked) and/or flow/tests/test_deployment_integration.py, add a test that drives an issue through todo -> dev -> review and asserts that after each transition the label set passed to provider.set_labels contains exactly one label from {s.value for s in State}. At minimum assert: after the todo->dev transition, crewflow:todo is absent and crewflow:dev present; and that transition_state guarantees a review transition drops crewflow:dev. Reproduce the #107 scenario: feed labels that already contain two states ({'crewflow:todo','crewflow:review'}) into the label-application path and assert the applied set has exactly one state label.",
+    "Run ruff, mypy, and the full suite."
+  ],
+  "acceptance_criteria": [
+    "Every set_labels call in deployment.py that changes an issue's state produces a label set with exactly one crewflow state label (verified by routing state changes through transition_state)",
+    "The DISPATCH_DEV path applies the todo->dev transition via provider.set_labels (outside dry-run) so the issue leaves crewflow:todo deterministically, not only via the LLM session",
+    "Modifiers and type/priority labels are preserved across every transition applied in deployment.py",
+    "flow/prompts/dev.md instructs the agent to remove the prior state label when moving to crewflow:review",
+    "A test drives todo->dev->review and asserts no state label accumulation (exactly one state label after each transition), including an explicit reproduction of the #107 two-state input",
+    "python3.12 -m pytest flow/tests/ -q passes (except the known root-permission failure), ruff clean, mypy clean"
+  ],
+  "verification": [
+    "python3.12 -m ruff check flow/",
+    "python3.12 -m mypy flow/ --ignore-missing-imports",
+    "python3.12 -m pytest flow/tests/ -q"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

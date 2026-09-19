@@ -1,0 +1,30 @@
+{
+  "id": "FEAT-002",
+  "type": "fix",
+  "description": "Add a pure, atomic transition_state() helper to flow/domain/state.py that enforces the 'exactly 1 state label' invariant, and unit-test it. Given a current label set and a target State, it returns a NEW label set containing exactly the target state label, with ALL other crewflow state labels (spec/ready/todo/dev/review/qa/done) removed, while preserving every modifier (blocked/running/reviewed/hml-bypass/changes-requested/conflito), every type/priority label (crewflow:feature|bug|hotfix|debt, crewflow:p1|p2|p3), and any non-crewflow labels untouched. This is the single source of truth for a state change and lives in the domain layer (no I/O). Depends on FEAT-001.",
+  "status": "pending",
+  "steps": [
+    "In flow/domain/state.py, add a module-level helper transition_state(labels, novo_estado). Signature suggestion: def transition_state(labels: set[str] | frozenset[str] | list[str], novo_estado: State) -> set[str]. Accept the same label-collection types parse_state/parse_modifiers already accept (be tolerant of list input since deployment passes list[str] and item.labels is a frozenset).",
+    "Compute the set of all state values once: STATE_VALUES = {s.value for s in State} (or reuse the local pattern already in parse_state). Build the result by: taking the input labels, removing every label that is in STATE_VALUES, then adding novo_estado.value. Return a set[str] (deterministic content; do not rely on ordering).",
+    "Preserve ALL non-state labels exactly: modifiers, type/priority labels, and unknown/foreign labels (e.g. 'phase-1', 'documentation') must pass through unchanged. Only state labels are stripped.",
+    "Idempotence: transition_state(labels, X) applied twice yields the same set; and if the input already had exactly state X plus modifiers, the output equals the input set (order aside).",
+    "Add a short docstring in Portuguese consistent with the rest of the module, explaining the 'exatamente 1 estado' invariant and that modificadores/tipo/prioridade são preservados. Reference the README 'Estados — 1 por vez' rule.",
+    "Do NOT import anything from flow.adapters or any I/O library in state.py — the domain boundary test (flow/tests/test_domain_boundary.py) forbids it.",
+    "Add tests in flow/tests/test_domain_state.py in a new class (e.g. TestTransitionState), with NO mocks, covering: (a) todo->dev removes crewflow:todo and adds crewflow:dev; (b) dev->review removes crewflow:dev and adds crewflow:review; (c) an input that ALREADY has two state labels (e.g. {'crewflow:todo','crewflow:review'}) transitioned to a target ends with exactly ONE state label; (d) modifiers crewflow:running/crewflow:reviewed/crewflow:changes-requested/crewflow:blocked are preserved through a transition; (e) type/priority labels crewflow:feature and crewflow:p2 are preserved; (f) foreign labels like 'phase-1' are preserved; (g) idempotence when applied twice; (h) exactly one label from {s.value for s in State} is present in the result (assert len(result & STATE_VALUES) == 1).",
+    "Run ruff and the domain tests to confirm."
+  ],
+  "acceptance_criteria": [
+    "transition_state exists in flow/domain/state.py, is pure (no I/O, no adapter imports), and returns a label set with exactly one crewflow state label",
+    "Applying transition_state to any input (including one that erroneously has 2+ state labels) yields exactly one state label equal to the target",
+    "All modifiers, type/priority labels, and foreign labels present in the input are present unchanged in the output",
+    "New tests in flow/tests/test_domain_state.py cover the cases listed in steps and pass",
+    "flow/tests/test_domain_boundary.py still passes (no forbidden imports introduced)",
+    "python3.12 -m ruff check flow/ stays clean"
+  ],
+  "verification": [
+    "python3.12 -m ruff check flow/",
+    "python3.12 -m pytest flow/tests/test_domain_state.py flow/tests/test_domain_boundary.py -q"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

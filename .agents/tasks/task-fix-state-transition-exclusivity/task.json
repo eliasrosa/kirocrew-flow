@@ -1,0 +1,7 @@
+{
+  "task_id": "task-fix-state-transition-exclusivity",
+  "task_description": "Fix the KiroCrew Flow bug (observed live on issue #107) where a state transition does not remove the previous state, leaving overlapping crewflow:* state labels (e.g. crewflow:todo AND crewflow:review) that stall the next stage's dispatch. Introduce an atomic transition_state(labels, novo_estado) domain helper that guarantees exactly one state label while preserving modifiers and type/priority labels, wire it into the driving adapter and dev prompt so every state change is atomic, add tests proving todo->dev->review never accumulates states, and reinforce the '1 estado por vez' invariant in README and steering.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}

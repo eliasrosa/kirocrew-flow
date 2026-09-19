@@ -1,0 +1,25 @@
+{
+  "id": "FEAT-004",
+  "type": "docs",
+  "description": "Reinforce the 'Estados — 1 por vez' invariant in the README and the steering files, and document the new transition_state() helper as the single source of truth for state changes. Satisfies the acceptance criterion that README/steering reinforce the invariant in code. Depends on FEAT-002 and FEAT-003 (so the docs describe what actually exists).",
+  "status": "pending",
+  "steps": [
+    "In README.md, in the 'Modelo de labels' -> 'Estados — 1 por vez, nesta ordem' section, add a short note that state exclusivity is enforced in code by flow.domain.state.transition_state(), which produces a label set with exactly one state label while preserving modifiers and type/priority labels, and that every state change in the driving adapter goes through it. Reference the #107-style failure (two overlapping states blocking the next stage) as the motivation, briefly.",
+    "In .kiro/steering/fluxo.md, in the 'Labels — duas dimensões' / 'Estados (1 por vez, ordem canônica)' area, add a sentence stating the invariant is enforced atomically: applying a new state removes all other states in the same set_labels operation, via transition_state(); modificadores e tipo/prioridade são preservados.",
+    "In .kiro/steering/arquitetura.md, update the flow/domain/state.py bullet (the line listing 'State, Modifier, is_dispatchable(), can_transition()') to also list transition_state(), and add a short note in the 'Fluxo de uma issue pela arquitetura' or 'Convenções' area that state transitions applied by deployment.py must go through transition_state() so the '1 estado por vez' invariant is never violated.",
+    "Keep wording in Portuguese consistent with the surrounding docs. Do not use em dashes; match the existing punctuation style. Do not regenerate mermaid diagrams or PNGs.",
+    "Run ruff and the full test suite as a final sanity check (docs changes should not affect tests, but confirm nothing regressed)."
+  ],
+  "acceptance_criteria": [
+    "README.md 'Estados — 1 por vez' section references transition_state() and the enforced single-state invariant",
+    ".kiro/steering/fluxo.md states the invariant is enforced atomically on state application",
+    ".kiro/steering/arquitetura.md lists transition_state() under flow/domain/state.py and notes deployment.py routes transitions through it",
+    "No code regressions: python3.12 -m pytest flow/tests/ -q still passes (except the known root-permission failure) and ruff stays clean"
+  ],
+  "verification": [
+    "python3.12 -m ruff check flow/",
+    "python3.12 -m pytest flow/tests/ -q"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
