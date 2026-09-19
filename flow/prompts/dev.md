@@ -17,7 +17,7 @@ FLUXO (execute UMA vez, do início ao fim, e PARE):
    Não pule esta etapa — as steerings têm convenções e gotchas críticos, e os
    comentários podem conter adendos e decisões que refinam o escopo.
 2. ESCOPO: se a issue exige decisão de design não-tomada ou é vaga, NÃO implemente — comente, marque `crewflow:blocked`, avise e ENCERRE.
-3. Marque `crewflow:dev` + `crewflow:running`. NÃO faça `git clone`. Use o clone em `{{dev_root}}/{{repo_short}}` como base e crie um WORKTREE ISOLADO.
+3. Marque `crewflow:dev` + `crewflow:running` e REMOVA o estado anterior na MESMA operação (exatamente 1 estado por vez): `gh issue edit {{issue_number}} --repo {{repo}} --add-label crewflow:dev --add-label crewflow:running --remove-label crewflow:todo`. NÃO faça `git clone`. Use o clone em `{{dev_root}}/{{repo_short}}` como base e crie um WORKTREE ISOLADO.
    A branch base é a DEFAULT DO REPO — descubra, não presuma:
    `BASE=$(gh repo view {{repo}} --json defaultBranchRef --jq .defaultBranchRef.name)`
    `cd {{dev_root}}/{{repo_short}} && git fetch origin && git worktree add -b feat/issue-{{issue_number}} {{worktree_path}} "origin/$BASE"`
@@ -25,7 +25,7 @@ FLUXO (execute UMA vez, do início ao fim, e PARE):
 4. Implemente EXATAMENTE o escopo — nada além.
 5. DOCS: atualize README, steerings e docs/ se a mudança afeta comportamento, arquitetura ou convenções. Não atualize se a mudança for puramente interna (bugfix, refactor).
 6. Valide localmente (build/testes). Se falhar e não conseguir corrigir, pare em `crewflow:blocked`.
-7. Abra PR com 'Closes #{{issue_number}}' e troque a label para `crewflow:review`. Após abrir o PR, ATUALIZE o título da sessão adicionando o número do PR: `{{repo_short}} #{{issue_number}} #<N-PR>: {{issue_title}}`. **NUNCA mergeie. NUNCA faça deploy.** Ambos são ações humanas manuais.
+7. Abra PR com 'Closes #{{issue_number}}' e mova para `crewflow:review` REMOVENDO os estados anteriores na MESMA operação `gh` (exatamente 1 estado por vez — jamais deixe `crewflow:todo`/`crewflow:dev` acumulados junto de `crewflow:review`): `gh issue edit {{issue_number}} --repo {{repo}} --add-label crewflow:review --remove-label crewflow:dev --remove-label crewflow:todo`. Após abrir o PR, ATUALIZE o título da sessão adicionando o número do PR: `{{repo_short}} #{{issue_number}} #<N-PR>: {{issue_title}}`. **NUNCA mergeie. NUNCA faça deploy.** Ambos são ações humanas manuais.
 8. Ao terminar: {{notify_step}}remova `crewflow:running` (mantenha `crewflow:review`), e ENCERRE.
 {{vault_step}}
 REGRAS CRÍTICAS:

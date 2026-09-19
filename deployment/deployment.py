@@ -51,6 +51,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -494,8 +495,11 @@ _DEV_PROMPT_FALLBACK = (
     "   comentários podem conter adendos e decisões que refinam o escopo.\n"
     "2. ESCOPO: se a issue exige decisão de design não-tomada ou é vaga, NÃO implemente — "
     "comente, marque `crewflow:blocked`, avise e ENCERRE.\n"
-    "3. Marque `crewflow:dev` + `crewflow:running`. NÃO faça `git clone`. Use o clone em "
-    "`{{dev_root}}/{{repo_short}}` como base e crie um WORKTREE ISOLADO.\n"
+    "3. Marque `crewflow:dev` + `crewflow:running` e REMOVA o estado anterior na MESMA "
+    "operação (exatamente 1 estado por vez): "
+    "`gh issue edit {{issue_number}} --repo {{repo}} --add-label crewflow:dev "
+    "--add-label crewflow:running --remove-label crewflow:todo`. NÃO faça `git clone`. "
+    "Use o clone em `{{dev_root}}/{{repo_short}}` como base e crie um WORKTREE ISOLADO.\n"
     "   A branch base é a DEFAULT DO REPO — descubra, não presuma:\n"
     "   `BASE=$(gh repo view {{repo}} --json defaultBranchRef --jq .defaultBranchRef.name)`\n"
     "   `cd {{dev_root}}/{{repo_short}} && git fetch origin && git worktree add -b "
@@ -506,7 +510,11 @@ _DEV_PROMPT_FALLBACK = (
     "arquitetura ou convenções. Não atualize se a mudança for puramente interna (bugfix, refactor).\n"
     "6. Valide localmente (build/testes). Se falhar e não conseguir corrigir, "
     "pare em `crewflow:blocked`.\n"
-    "7. Abra PR com 'Closes #{{issue_number}}' e troque a label para `crewflow:review`. "
+    "7. Abra PR com 'Closes #{{issue_number}}' e mova para `crewflow:review` REMOVENDO os "
+    "estados anteriores na MESMA operação `gh` (exatamente 1 estado por vez — jamais deixe "
+    "`crewflow:todo`/`crewflow:dev` acumulados junto de `crewflow:review`): "
+    "`gh issue edit {{issue_number}} --repo {{repo}} --add-label crewflow:review "
+    "--remove-label crewflow:dev --remove-label crewflow:todo`. "
     "Após abrir o PR, ATUALIZE o título da sessão adicionando o número do PR: "
     "`{{repo_short}} #{{issue_number}} #<N-PR>: {{issue_title}}`. "
     "**NUNCA mergeie. NUNCA faça deploy.** Ambos são ações humanas manuais.\n"
@@ -684,7 +692,13 @@ def _dispatch(
 # ── Conversão ScanResult → formato legado do dispatch ────────────────────
 
 def _scan_result_to_issue(result: object) -> dict:
-    """Converte um ScanResult para o formato mínimo que o prompt de dispatch precisa."""
+    """Converte um ScanResult para o formato mínimo que o prompt de dispatch precisa.
+
+    Além de ``number``/``title``/``url`` (consumidos pelo prompt), carrega o
+    conjunto de labels atual (``_labels``) e a key canônica (``_key``) para que
+    o adapter possa aplicar a transição de estado atômica via ``set_labels``
+    sem precisar reabrir o ScanResult.
+    """
     r: ScanResult = result  # type: ignore[assignment]
     item = r.item
     # Extrai o número da issue key ("VGAT-123" → 123, "owner/repo#42" → 42)
@@ -695,7 +709,98 @@ def _scan_result_to_issue(result: object) -> dict:
         "number": number,
         "title": item.title,
         "url": item.key,  # key é a URL canônica no adapter GitHub
+        "_labels": list(item.labels),  # labels atuais para transição de estado
+        "_key": item.key,              # key canônica para set_labels
     }
+
+
+def _apply_decision_labels(
+    base_labels: Iterable[str],
+    add_labels: Iterable[str] | None,
+    remove_labels: Iterable[str] | None,
+) -> list[str]:
+    """Aplica add/remove de uma decisão garantindo exclusividade de estado.
+
+    Regra central (invariante "Estados — 1 por vez"): se ``add_labels`` contém
+    QUALQUER label de estado (``crewflow:spec|ready|todo|dev|review|qa|done``),
+    a transição é feita via :func:`flow.domain.state.transition_state`, que
+    remove todos os outros estados de ``base_labels`` e adiciona exatamente o
+    estado alvo — preservando modificadores, tipo/prioridade e labels
+    estrangeiras. Em seguida os ``remove_labels`` são removidos e os
+    ``add_labels`` restantes (não-estado, ex: ``crewflow:running``) são
+    adicionados.
+
+    Quando ``add_labels`` contém APENAS modificadores/tipo (ex:
+    ``crewflow:conflito``, ``crewflow:changes-requested``), o comportamento é o
+    add/remove simples de sempre — nenhum estado é tocado.
+
+    Retorna uma lista ordenada e determinística de labels.
+    """
+    from flow.domain.state import State, transition_state
+
+    _base = list(base_labels)
+    _add = list(add_labels or ())
+    _remove = list(remove_labels or ())
+    state_values = {s.value for s in State}
+
+    # Detecta um label de estado nos add_labels (deve haver no máximo um).
+    state_in_add = next((lbl for lbl in _add if lbl in state_values), None)
+
+    resultado: set[str]
+    if state_in_add is not None:
+        # Transição atômica: base fica com exatamente 1 estado (o alvo).
+        resultado = transition_state(_base, State(state_in_add))
+    else:
+        # Sem troca de estado: parte da base preservando o estado existente.
+        resultado = set(_base)
+
+    # Remove os labels pedidos pela decisão.
+    for lbl in _remove:
+        resultado.discard(lbl)
+
+    # Adiciona os add_labels que não são estado (modificadores/tipo).
+    for lbl in _add:
+        if lbl not in state_values:
+            resultado.add(lbl)
+
+    return sorted(resultado)
+
+
+def _apply_dev_transition(
+    provider: object,
+    repo: str,
+    issue: dict,
+) -> None:
+    """Aplica a transição atômica todo→dev na issue via ``provider.set_labels``.
+
+    Chamada logo após um dispatch de dev efetivamente disparado (auto_dispatch
+    ligado, fora do dry-run, sessão realmente enviada). Garante que a issue
+    deixe ``crewflow:todo`` de forma determinística e imediata em vez de
+    depender do que a sessão one-shot fizer via ``gh`` — que é onde o estado
+    antigo deixava de ser removido e causava a acumulação da #107.
+
+    Usa :func:`flow.domain.state.transition_state` para produzir um conjunto
+    com exatamente 1 estado (``crewflow:dev``), preservando modificadores,
+    tipo/prioridade e labels estrangeiras, e adiciona ``crewflow:running``
+    (modificador do trabalho em andamento). Falhas são logadas mas não
+    propagam — o dispatch em si já ocorreu.
+    """
+    from flow.domain.state import Modifier, State, transition_state
+
+    base_labels = issue.get("_labels", [])
+    key = issue.get("_key") or issue.get("url") or str(issue.get("number", ""))
+    try:
+        new_labels = transition_state(base_labels, State.DEV)
+        new_labels.add(Modifier.RUNNING.value)
+        provider.set_labels(repo, key, sorted(new_labels))  # type: ignore[attr-defined]
+        logger.info(
+            "deployment: transição todo→dev aplicada em %s (labels=%s)",
+            key, sorted(new_labels),
+        )
+    except Exception as exc:
+        logger.error(
+            "deployment: falha ao aplicar transição todo→dev em %s: %s", key, exc
+        )
 
 
 # ── Ponto de entrada do cron ──────────────────────────────────────────────
@@ -1121,12 +1226,13 @@ def run(ctx: object) -> None:
     # ── Aplica rebranding (troca de template) ─────────────────────────────
     for result, decision in rebranded:  # type: ignore[assignment]
         try:
-            # Atualiza as labels para refletir o novo template
-            current_labels = list(result.item.labels)
-            for lbl in decision.remove_labels:
-                if lbl in current_labels:
-                    current_labels.remove(lbl)
-            current_labels.extend(decision.add_labels)
+            # Atualiza as labels para refletir o novo template, garantindo
+            # exclusividade de estado via _apply_decision_labels.
+            current_labels = _apply_decision_labels(
+                result.item.labels,
+                getattr(decision, "add_labels", ()),
+                getattr(decision, "remove_labels", ()),
+            )
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             provider.set_labels(repo, result.item.key, current_labels)
             logger.info("deployment: rebrand %s → %s", result.item.key, decision.new_template)
@@ -1179,6 +1285,11 @@ def run(ctx: object) -> None:
             _dispatch(ctx, repo, issue, cfg, prompt_extra=prompt_extra)
             disparadas.append((repo, issue))
             vagas -= 1
+            # Transição atômica todo→dev via provider: a issue deixa
+            # crewflow:todo de forma determinística (não depende do LLM), com
+            # crewflow:running marcado. transition_state remove qualquer outro
+            # estado (corrige a acumulação da #107).
+            _apply_dev_transition(provider, repo, issue)
         except Exception as exc:
             logger.error("deployment: erro ao despachar %s: %s", issue.get("number"), exc)
             adiadas.append((repo, issue))
@@ -1253,13 +1364,7 @@ def run(ctx: object) -> None:
             with contextlib.suppress(Exception):
                 _key = result.item.key
                 _repo_lbl = _key.split("/issues/")[0].replace("https://github.com/", "") or (repos[0] if repos else "")
-                current_labels = list(result.item.labels)
-                for lbl in _remove:
-                    if lbl in current_labels:
-                        current_labels.remove(lbl)
-                for lbl in _add:
-                    if lbl not in current_labels:
-                        current_labels.append(lbl)
+                current_labels = _apply_decision_labels(result.item.labels, _add, _remove)
                 provider.set_labels(_repo_lbl, _key, current_labels)
                 logger.info("deployment: labels atualizadas para %s: +%s -%s", _key, list(_add), list(_remove))
 
@@ -1347,10 +1452,9 @@ def run(ctx: object) -> None:
         for result in mark_conflitos:
             try:
                 _repo_mc = result.item.key.split("/issues/")[0].replace("https://github.com/", "") or (repos[0] if repos else "")
-                current_labels = list(result.item.labels)
-                for lbl in ("crewflow:conflito",):
-                    if lbl not in current_labels:
-                        current_labels.append(lbl)
+                current_labels = _apply_decision_labels(
+                    result.item.labels, ("crewflow:conflito",), (),
+                )
                 provider.set_labels(_repo_mc, result.item.key, current_labels)
                 logger.info("deployment: crewflow:conflito aplicado em %s", result.item.key)
             except Exception as exc:
@@ -2262,15 +2366,14 @@ def _execute_auto_merges(
                         pr_branch, pr_number,
                     )
 
-            # Atualiza labels da issue: remove review/reviewed, adiciona done
+            # Atualiza labels da issue: transição review→done atômica
+            # (remove todos os outros estados) e limpa o modificador reviewed.
             try:
                 item_data = gh_client.get_work_item(repo, str(issue_number))
-                current_labels = list(item_data.get("labels", []))
-                for lbl in ("crewflow:review", "crewflow:reviewed"):
-                    if lbl in current_labels:
-                        current_labels.remove(lbl)
-                if "crewflow:done" not in current_labels:
-                    current_labels.append("crewflow:done")
+                base_labels = list(item_data.get("labels", []))
+                current_labels = _apply_decision_labels(
+                    base_labels, ("crewflow:done",), ("crewflow:reviewed",),
+                )
                 gh_client.set_labels(repo, str(issue_number), current_labels)
             except Exception as exc:
                 logger.warning(
@@ -2662,6 +2765,8 @@ def _run_stage(ctx: object, stage: str) -> None:
                 _dispatch(ctx, repo, issue, cfg, prompt_extra=prompt_extra)
                 disparadas.append((repo, issue))
                 vagas -= 1
+                # Transição atômica todo→dev via provider (ver run()).
+                _apply_dev_transition(provider, repo, issue)
             except Exception as exc:
                 logger.error("deployment[dev]: erro ao despachar %s: %s", issue.get("number"), exc)
                 adiadas.append((repo, issue))

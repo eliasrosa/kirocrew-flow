@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -563,3 +564,181 @@ class TestDeploymentRunE2E:
             run(ctx)
 
         ctx.notify.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# E2E: exclusividade de estado na transição (regressão da issue #107)
+# ---------------------------------------------------------------------------
+
+class TestStateTransitionExclusivityE2E:
+    """A transição de estado nunca deve acumular 2+ labels de estado (#107).
+
+    Cobre o caminho todo→dev→review no adapter de deployment, garantindo que
+    cada ``set_labels`` produz exatamente 1 label de estado, preservando
+    modificadores/tipo/prioridade.
+    """
+
+    def _make_ctx(self) -> mock.MagicMock:
+        ctx = mock.MagicMock()
+        ctx._port = 5000
+        ctx._secret = "secret"
+        ctx.job.id = "test-job"
+        return ctx
+
+    def _config(self, **overrides: object) -> dict:
+        base = {
+            "repos": ["owner/api-gateway2"],
+            "auto_dispatch": True,
+            "max_concurrent": 2,
+            "one_per_repo": True,
+            "notify_chat_id": "",
+            "squad_id": "test",
+            "issue_provider": "github",
+            "dev_root": "/tmp/dev",
+            "agent": "kirocrew",
+            "routing": [
+                {"match": {"labels": ["crewflow:hotfix"]}, "workflow": "hotfix-flow"},
+                {"default": "feature-flow"},
+            ],
+        }
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def _state_labels(labels: Iterable[str]) -> set[str]:
+        state_values = {s.value for s in State}
+        return {lbl for lbl in labels if lbl in state_values}
+
+    def test_apply_decision_labels_com_dois_estados_deixa_um(self) -> None:
+        """Reproduz #107: entrada com DOIS estados → saída com exatamente 1."""
+        from deployment.deployment import _apply_decision_labels
+
+        # A issue está corrompida: tem todo E review ao mesmo tempo.
+        base = [
+            "crewflow:todo", "crewflow:review",
+            "crewflow:feature", "crewflow:p1", "phase-1",
+        ]
+        # A decisão move para dev + running (o gatilho do dispatch de dev).
+        result = _apply_decision_labels(
+            base, ("crewflow:dev", "crewflow:running"), ("crewflow:todo",),
+        )
+
+        state_labels = self._state_labels(result)
+        assert state_labels == {"crewflow:dev"}, result
+        assert len(state_labels) == 1
+        # Modificadores/tipo/prioridade/estrangeiras preservados.
+        assert "crewflow:running" in result
+        assert "crewflow:feature" in result
+        assert "crewflow:p1" in result
+        assert "phase-1" in result
+        # Os estados antigos sumiram.
+        assert "crewflow:todo" not in result
+        assert "crewflow:review" not in result
+
+    def test_apply_decision_labels_so_modificador_nao_toca_estado(self) -> None:
+        """add_labels só com modificador (conflito) preserva o estado atual."""
+        from deployment.deployment import _apply_decision_labels
+
+        base = ["crewflow:review", "crewflow:bug"]
+        result = _apply_decision_labels(base, ("crewflow:conflito",), ())
+
+        assert self._state_labels(result) == {"crewflow:review"}
+        assert "crewflow:conflito" in result
+        assert "crewflow:bug" in result
+
+    def test_apply_dev_transition_remove_estado_anterior(self) -> None:
+        """_apply_dev_transition aplica todo→dev via set_labels sem acumular."""
+        from deployment.deployment import _apply_dev_transition
+
+        provider = mock.MagicMock()
+        provider.set_labels.return_value = None
+        issue = {
+            "number": 107,
+            "title": "[api-gateway2] Bug #107",
+            "url": "https://github.com/owner/api-gateway2/issues/107",
+            "_labels": ["crewflow:todo", "crewflow:feature", "crewflow:p2"],
+            "_key": "https://github.com/owner/api-gateway2/issues/107",
+        }
+
+        _apply_dev_transition(provider, "owner/api-gateway2", issue)
+
+        provider.set_labels.assert_called_once()
+        applied = provider.set_labels.call_args[0][2]
+        assert self._state_labels(applied) == {"crewflow:dev"}
+        assert "crewflow:todo" not in applied
+        assert "crewflow:running" in applied
+        assert "crewflow:feature" in applied
+        assert "crewflow:p2" in applied
+
+    def test_run_todo_para_dev_nao_acumula_estado(self) -> None:
+        """run() com auto_dispatch: dispatch de dev aplica todo→dev via provider."""
+        from deployment.deployment import run
+        from flow.domain.gates import WorkItem
+
+        ctx = self._make_ctx()
+        result = ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/api-gateway2/issues/107",
+                title="[api-gateway2] Bug #107",
+                labels=frozenset(["crewflow:todo", "crewflow:feature", "crewflow:p1"]),
+            ),
+            current_state=State.TODO,
+            modifiers=frozenset(),
+            dispatch_candidate=True,
+            spec_valid=None,
+            changed=True,
+            reason="test",
+        )
+
+        provider_mock = mock.MagicMock()
+        provider_mock.get_state_comment.return_value = None
+        provider_mock.set_labels.return_value = None
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=self._config()),
+            mock.patch("deployment.deployment.scan_candidates",
+                       return_value=[result]),
+            mock.patch("deployment.deployment.provider_for",
+                       return_value=provider_mock),
+            mock.patch("deployment.deployment._issue_has_active_session",
+                       return_value=False),
+            mock.patch("deployment.deployment._resource_headroom_ok",
+                       return_value=True),
+            mock.patch("deployment.deployment._clean_stale_worktree",
+                       return_value=False),
+            mock.patch("deployment.deployment._active_sessions",
+                       return_value=0),
+            mock.patch("deployment.deployment._dispatch") as mock_dispatch,
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+        ):
+            mock_cache.return_value = sqlite3.connect(":memory:")
+            run(ctx)
+
+        # A sessão foi realmente disparada...
+        mock_dispatch.assert_called_once()
+        # ...e a transição todo→dev foi aplicada atomicamente via provider.
+        provider_mock.set_labels.assert_called_once()
+        applied = provider_mock.set_labels.call_args[0][2]
+        assert self._state_labels(applied) == {"crewflow:dev"}
+        assert "crewflow:todo" not in applied
+        assert "crewflow:running" in applied
+        # Tipo/prioridade preservados na transição.
+        assert "crewflow:feature" in applied
+        assert "crewflow:p1" in applied
+
+    def test_transition_state_review_derruba_dev(self) -> None:
+        """A transição dev→review (domínio) nunca mantém crewflow:dev."""
+        from flow.domain.state import State as _State
+        from flow.domain.state import transition_state
+
+        # A issue está em dev+running; move para review.
+        novo = transition_state(
+            {"crewflow:dev", "crewflow:running", "crewflow:feature"},
+            _State.REVIEW,
+        )
+        state_labels = self._state_labels(novo)
+        assert state_labels == {"crewflow:review"}
+        assert "crewflow:dev" not in novo
+        assert "crewflow:running" in novo  # modificador preservado
+        assert "crewflow:feature" in novo
