@@ -374,8 +374,6 @@ def _clean_stale_worktree(dev_root: str, repo: str, issue_number: int) -> bool:
     principal seja atualizado corretamente. Falhas são logadas mas não propagadas
     — um worktree preso não deve bloquear o dispatch de outras tasks.
     """
-    import subprocess
-
     wt_path = _worktree_path(dev_root, repo, issue_number)
     if not os.path.exists(wt_path):
         return False
@@ -599,7 +597,7 @@ def _pr_exists(repo: str, issue_number: int) -> bool:
     def _run_gh_pr_list(extra_args: list[str]) -> list[dict]:
         """Executa gh pr list com os args fornecidos e retorna a lista de PRs."""
         cmd = ["gh", "pr", "list", "--repo", repo, "--state", "open",
-               "--json", "number"] + extra_args
+               "--json", "number", *extra_args]
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=15, check=False,
@@ -2005,8 +2003,6 @@ def _dispatch_reviewer(
     Localiza o PR aberto da issue e despacha o reviewer com o prompt correto.
     Fallback para notificação se o PR não for encontrado.
     """
-    import subprocess
-
     issue_number = issue["number"]
     chat_id = cfg.get("notify_chat_id") or ""
     vm = f" (voice_maybe chat_id {chat_id}, intent auto)" if chat_id else ""
