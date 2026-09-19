@@ -123,6 +123,50 @@ def _sessdir() -> str:
 
 _LOCK_STALE_SECS = 2 * 3600  # locks mais velhos que 2h são considerados obsoletos
 
+# ── Concorrência dirigida por estado (issue #90) ──────────────────────────
+# A VERDADE de concorrência é o ESTADO da issue (label/state_comment), não o
+# mtime do lock. O lock/arquivo de sessão vira apenas um BACKSTOP curto contra
+# duplo-dispatch (dois ciclos de cron disparando o mesmo slot em segundos), e o
+# timeout longo é usado SÓ como DETECTOR de sessão morta — nunca como liberador
+# de fila. A liberação da fila é dirigida por estado (recolocar em crewflow:todo).
+_DISPATCH_BACKSTOP_SECS = 10       # anti-duplo-dispatch: mesmo slot em segundos
+_DEAD_SESSION_SECS_DEFAULT = 40 * 60  # 40 min — detector de sessão morta (default)
+
+
+def _dead_session_secs(cfg: dict | None = None) -> int:
+    """Timeout longo (segundos) usado SÓ como detector de sessão morta.
+
+    Sobrescrevível via config: ``dead_session_secs`` (segundos) tem prioridade
+    sobre ``dead_session_minutes`` (minutos). Default: 40 min. NUNCA é usado
+    para liberar a fila — apenas para decidir se uma sessão em crewflow:running
+    está morta (combinado com os demais sinais em ``_is_session_dead``).
+    """
+    if not cfg:
+        return _DEAD_SESSION_SECS_DEFAULT
+    raw_secs = cfg.get("dead_session_secs")
+    if raw_secs is not None:
+        try:
+            val = int(raw_secs)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    raw_min = cfg.get("dead_session_minutes")
+    if raw_min is not None:
+        try:
+            val = int(raw_min) * 60
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return _DEAD_SESSION_SECS_DEFAULT
+
+
+# ── Estados "em andamento" que tornam um repo ocupado (one_per_repo) ──────
+# Uma issue nesses estados ocupa a única vaga do repo. A decisão é dirigida por
+# ESTADO (label), não pelo mtime do lock.
+_IN_PROGRESS_LABELS = (LABEL_RUNNING, LABEL_DEV)
+
 
 def _lock_is_stale(path: str) -> bool:
     """Retorna True se o arquivo de lock existe mas é antigo (sessão provavelmente encerrada)."""
@@ -143,6 +187,83 @@ def _repo_has_active(repo: str) -> bool:
     short = repo.split("/")[-1]
     locks = glob.glob(os.path.join(_sessdir(), f"dashboard_esteira-{short}-*.jsonl.lock"))
     return any(not _lock_is_stale(p) for p in locks)
+
+
+def _session_write_is_recent(repo: str, issue_number: int, max_age_secs: int) -> bool | None:
+    """Verifica se a sessão desta issue teve escrita recente no lock/arquivo.
+
+    Procura ``dashboard_esteira-<short>-<issue>.jsonl`` e ``.jsonl.lock`` sob
+    ``_sessdir()`` e considera "recente" quando o mtime mais novo é mais recente
+    que ``max_age_secs``.
+
+    Retorna:
+      - True  se houver escrita recente (sessão provavelmente viva)
+      - False se o(s) arquivo(s) existem mas o mtime é mais velho que o timeout
+      - None  se não houver arquivo de sessão OU se a leitura do mtime falhar
+              (sinal INCERTO — o chamador deve tratar como fail-closed)
+    """
+    import time as _time
+
+    short = repo.split("/")[-1]
+    patterns = [
+        os.path.join(_sessdir(), f"dashboard_esteira-{short}-{issue_number}.jsonl"),
+        os.path.join(_sessdir(), f"dashboard_esteira-{short}-{issue_number}.jsonl.lock"),
+    ]
+    paths = [p for pat in patterns for p in glob.glob(pat)]
+    if not paths:
+        return None
+    now = _time.time()
+    newest_age: float | None = None
+    for p in paths:
+        try:
+            age = now - os.path.getmtime(p)
+        except OSError:
+            # Não conseguimos ler o mtime — sinal incerto.
+            return None
+        if newest_age is None or age < newest_age:
+            newest_age = age
+    if newest_age is None:
+        return None
+    return newest_age <= max_age_secs
+
+
+def _labels_of_item(item: dict) -> list[str]:
+    """Extrai as labels de um item normalizado (defensivo)."""
+    raw = item.get("labels") or []
+    return [str(lbl) for lbl in raw]
+
+
+def _state_allows_dispatch(provider: object, repo: str, one_per_repo: bool) -> bool | None:
+    """Decide, POR ESTADO da issue, se o repo aceita um novo dispatch de dev.
+
+    A regra ``one_per_repo`` (máx 1 task ativa por repo) é avaliada consultando
+    o provider por issues em estado "em andamento" (crewflow:dev ou carregando
+    crewflow:running). Se QUALQUER uma existir, o repo está ocupado.
+
+    Retorna:
+      - True  se o repo está livre (pode despachar)
+      - False se o repo está ocupado por uma issue em andamento
+      - None  se a consulta ao provider falhar (sinal INCERTO → o chamador
+              deve FALHAR FECHADO: não despachar)
+
+    NÃO usa mtime de lock: a verdade é o estado da issue.
+    """
+    if not one_per_repo:
+        return True
+    try:
+        for state_label in _IN_PROGRESS_LABELS:
+            items = provider.list_by_state(repo, state_label)  # type: ignore[attr-defined]
+            for item in items or []:
+                labels = _labels_of_item(item)
+                if any(lbl in labels for lbl in _IN_PROGRESS_LABELS):
+                    return False
+        return True
+    except Exception as exc:
+        logger.warning(
+            "deployment: consulta de estado do repo %s falhou (%s) — fail-closed (repo tratado como ocupado)",
+            repo, exc,
+        )
+        return None
 
 
 # ── Workspace isolado por task (worktree efêmero) ─────────────────────────
@@ -409,6 +530,327 @@ def _pr_exists(repo: str, issue_number: int) -> bool:
             repo, issue_number, exc,
         )
         return False
+
+
+def _worktree_is_active(dev_root: str, repo: str, issue_number: int) -> bool | None:
+    """Verifica se há worktree ATIVO para esta task.
+
+    Retorna:
+      - True  se o diretório do worktree existe (task provavelmente viva)
+      - False se o diretório não existe
+      - None  se a checagem levantar (sinal INCERTO → fail-closed pelo chamador)
+
+    Mantém-se conservador: se o diretório do worktree existe, assume-se ativo
+    (não tentamos inferir "órfão" aqui — isso é papel de _clean_stale_worktree).
+    """
+    try:
+        wt_path = _worktree_path(dev_root, repo, issue_number)
+        return os.path.exists(wt_path)
+    except Exception as exc:
+        logger.warning(
+            "deployment: erro ao checar worktree de %s#%s: %s", repo, issue_number, exc
+        )
+        return None
+
+
+def _running_age_secs(provider: object, repo: str, issue: dict) -> float | None:
+    """Idade (segundos) desde que a issue entrou em crewflow:running.
+
+    Deriva do histórico do state_comment (última transição para crewflow:running
+    ou crewflow:dev). Retorna None quando não há como determinar com confiança
+    (sem state_comment, sem transição relevante, ou erro de I/O) — sinal INCERTO.
+    """
+    import time as _time
+    from datetime import datetime
+
+    try:
+        body = provider.get_state_comment(repo, issue["url"])  # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.warning(
+            "deployment: erro ao ler state_comment de %s#%s: %s",
+            repo, issue.get("number"), exc,
+        )
+        return None
+    if not body:
+        return None
+    from flow.audit.state_comment import parse
+    sc = parse(body)
+    if sc is None or not sc.history:
+        return None
+    # Última transição que levou a running/dev.
+    when_str: str | None = None
+    for entry in sc.history:
+        if entry.to_state in _IN_PROGRESS_LABELS:
+            when_str = entry.when
+    if when_str is None:
+        return None
+    try:
+        dt = datetime.strptime(when_str, "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    age = _time.time() - dt.timestamp()
+    return age if age >= 0 else None
+
+
+def _is_session_dead(
+    dev_root: str,
+    repo: str,
+    issue_number: int,
+    provider: object,
+    issue: dict,
+    now: float | None = None,
+    cfg: dict | None = None,
+) -> bool:
+    """Detecta se a sessão em crewflow:running está MORTA.
+
+    Considera morta SOMENTE quando TODOS os sinais combinados valem:
+      (a) NÃO há PR aberto para feat/issue-<N>            (via _pr_exists)
+      (b) NÃO há worktree ativo em _worktree_path(...)    (diretório ausente)
+      (c) NÃO houve escrita recente no lock/arquivo de sessão
+          (mtime mais velho que o timeout longo)
+      (d) a issue está em crewflow:running há MAIS que o timeout longo
+
+    FALHA FECHADO: se QUALQUER sinal for incerto (chamada gh/provider levantou,
+    mtime ilegível, idade de running desconhecida), retorna False — melhor
+    estagnar do que duplo-despachar.
+    """
+    long_secs = _dead_session_secs(cfg)
+    _ = now  # parâmetro reservado para testes determinísticos
+
+    # (a) PR aberto → sessão viva (ou pelo menos com resultado).
+    #
+    # ATENÇÃO ao comportamento de _pr_exists: ele retorna False TANTO quando não
+    # há PR QUANTO quando o `gh` falha (returncode != 0 ou exceção). Ou seja,
+    # aqui NÃO distinguimos "gh falhou" de "não há PR" — um erro de gh vira
+    # False e este passo (a) NÃO faz curto-circuito para "não morta".
+    #
+    # Isso ainda é fail-closed-SEGURO neste detector porque a morte é um AND
+    # estrito: mesmo que um erro de gh esconda um PR real (False falso), os
+    # outros três sinais (worktree ausente, sessão sem escrita recente E running
+    # velho demais) precisam TODOS bater independentemente para declarar morta.
+    # A direção do risco é estagnação (não recuperar uma sessão viva), nunca
+    # duplo-dispatch. Só um True (há PR de fato) faz bail para "não morta".
+    if _pr_exists(repo, issue_number):
+        return False
+
+    # (b) worktree ativo → não morta; incerto → fail-closed.
+    wt_active = _worktree_is_active(dev_root, repo, issue_number)
+    if wt_active is None or wt_active is True:
+        return False
+
+    # (c) escrita recente na sessão → não morta; incerto (None) → fail-closed.
+    recent = _session_write_is_recent(repo, issue_number, long_secs)
+    if recent is None or recent is True:
+        return False
+
+    # (d) idade em running → precisa ser MAIOR que o timeout; incerto → fail-closed.
+    age = _running_age_secs(provider, repo, issue)
+    if age is None or age <= long_secs:
+        return False
+
+    logger.warning(
+        "deployment: sessão morta detectada para %s#%s "
+        "(sem PR, sem worktree, sessão sem escrita recente, running há %.0fs > %ds)",
+        repo, issue_number, age, long_secs,
+    )
+    return True
+
+
+def _recover_dead_session(
+    provider: object,
+    repo: str,
+    issue: dict,
+    ctx: object,
+    chat_id: str = "",
+) -> None:
+    """Recupera uma sessão morta recolocando a issue em crewflow:todo.
+
+    - Remove crewflow:running (e crewflow:dev, se presente) via read-modify-write
+      de labels (get_work_item → mutar → set_labels).
+    - Anexa uma transição de auditoria ao state_comment ('dead session detected
+      -> requeued') via helpers de flow.audit.state_comment + upsert_state_comment.
+    - Notifica via ctx.notify com o sufixo voice_maybe.
+
+    Tudo defensivo (contextlib.suppress ao redor de I/O), mas nunca engole a
+    decisão de fail-closed do detector (que roda ANTES desta função).
+    """
+    import contextlib
+
+    number = issue.get("number")
+    key = issue["url"]
+
+    # ── Read-modify-write das labels ──────────────────────────────────────
+    with contextlib.suppress(Exception):
+        item = provider.get_work_item(repo, str(number))  # type: ignore[attr-defined]
+        labels = _labels_of_item(item)
+        new_labels = [lbl for lbl in labels if lbl not in (LABEL_RUNNING, LABEL_DEV)]
+        if "crewflow:todo" not in new_labels:
+            new_labels.append("crewflow:todo")
+        provider.set_labels(repo, key, new_labels)  # type: ignore[attr-defined]
+        logger.info(
+            "deployment: sessão morta de %s#%s recuperada — issue recolocada em crewflow:todo",
+            repo, number,
+        )
+
+    # ── Auditoria no state_comment ────────────────────────────────────────
+    with contextlib.suppress(Exception):
+        from flow.audit.state_comment import StateComment, parse, render
+        body = provider.get_state_comment(repo, key)  # type: ignore[attr-defined]
+        sc = parse(body) if body else None
+        if sc is None:
+            short = repo.split("/")[-1]
+            sc = StateComment(
+                workflow="", current_node="todo", status="requeued", repo=short
+            )
+        sc.status = "requeued"
+        sc.current_node = "todo"
+        sc.add_transition(
+            from_state=LABEL_RUNNING,
+            to_state="crewflow:todo",
+            actor="system",
+        )
+        # Nota de auditoria como exceção (dead session detected -> requeued).
+        sc.add_exception(
+            label="crewflow:dead-session",
+            justification="dead session detected -> requeued",
+            actor="system",
+        )
+        provider.upsert_state_comment(repo, key, render(sc))  # type: ignore[attr-defined]
+
+    # ── Notificação ───────────────────────────────────────────────────────
+    with contextlib.suppress(Exception):
+        vm = f" (voice_maybe chat_id {chat_id}, intent auto)" if chat_id else ""
+        ctx.notify(  # type: ignore[attr-defined]
+            f"KiroCrew Flow: sessão morta detectada em {repo}#{number} — "
+            f"issue recolocada em crewflow:todo para re-dispatch.{vm}"
+        )
+
+
+def _dev_dispatch_allowed(
+    ctx: object,
+    provider: object,
+    repo: str,
+    issue: dict,
+    cfg: dict,
+    one_per_repo: bool,
+    chat_id: str = "",
+) -> str:
+    """Gate de dispatch de dev dirigido por ESTADO (issue #90).
+
+    Retorna uma das três decisões:
+      - "dispatch" → pode despachar agora
+      - "queue"    → adia (fila) — repo ocupado / headroom crítico / ambíguo
+      - "skip"     → não despacha e não enfileira (PR duplicado já existe)
+
+    Ordem das checagens:
+      1. PR duplicado (_pr_exists) → skip (anti-duplicata).
+      2. one_per_repo por ESTADO (_state_allows_dispatch):
+         - livre  → segue
+         - ocupado → tenta detectar/recuperar sessão morta na issue em andamento;
+                     se recuperou, o repo continua ocupado NESTE ciclo (fila) mas
+                     o próximo ciclo re-despacha; se não, fila.
+         - incerto (None) → FAIL-CLOSED → fila (não despacha).
+      3. headroom de recursos → fila se crítico.
+
+    O backstop curto (passo 3) usa _session_write_is_recent(..., _DISPATCH_BACKSTOP_SECS),
+    ou seja, o mtime do lock/arquivo de sessão desta issue — NÃO _repo_has_active.
+    Serve só para evitar disparar o MESMO slot duas vezes em segundos.
+    """
+    number = issue["number"]
+
+    # 1. Anti-duplicata: PR já aberto para feat/issue-<N>.
+    if _pr_exists(repo, number):
+        logger.info(
+            "deployment: PR duplicado detectado para %s#%s — pulando dispatch",
+            repo, number,
+        )
+        return "skip"
+
+    # 2. one_per_repo dirigido por estado.
+    allows = _state_allows_dispatch(provider, repo, one_per_repo)
+    if allows is None:
+        # Sinal incerto → fail-closed.
+        return "queue"
+    if allows is False:
+        # Repo ocupado por uma issue em andamento. Antes de considerar
+        # permanentemente ocupado, checa se a sessão em andamento está morta.
+        recovered = _maybe_recover_busy_repo(ctx, provider, repo, cfg, chat_id)
+        if not recovered:
+            return "queue"
+        # Recuperou uma sessão morta: a fila é liberada no PRÓXIMO ciclo.
+        # Neste ciclo ainda enfileira para não competir com a recuperação.
+        return "queue"
+
+    # 3. Backstop curto anti-duplo-dispatch: se o MESMO slot foi disparado
+    # nos últimos segundos (lock fresquíssimo), não redispara.
+    recent = _session_write_is_recent(repo, number, _DISPATCH_BACKSTOP_SECS)
+    if recent is True:
+        logger.info(
+            "deployment: backstop anti-duplo-dispatch — %s#%s disparado há <%ds, pulando",
+            repo, number, _DISPATCH_BACKSTOP_SECS,
+        )
+        return "skip"
+
+    # 4. Headroom de recursos (posture critical = adia).
+    if not _resource_headroom_ok(ctx, int(cfg.get("max_concurrent_tasks") or cfg.get("max_concurrent", 2))):
+        logger.warning(
+            "deployment: headroom crítico — issue %s#%s adiada", repo, number,
+        )
+        return "queue"
+
+    return "dispatch"
+
+
+def _maybe_recover_busy_repo(
+    ctx: object,
+    provider: object,
+    repo: str,
+    cfg: dict,
+    chat_id: str = "",
+) -> bool:
+    """Se o repo está ocupado por uma issue em andamento, tenta detectar sessão
+    morta e recuperá-la (recolocando em crewflow:todo).
+
+    Retorna True se recuperou pelo menos uma sessão morta (a fila será liberada
+    no próximo ciclo); False caso contrário (inclusive quando qualquer sinal é
+    incerto — fail-closed: não recupera).
+    """
+    dev_root = cfg.get("dev_root") or os.path.expanduser("~/dev")
+    recovered_any = False
+    try:
+        in_progress: list[dict] = []
+        seen: set[str] = set()
+        for state_label in _IN_PROGRESS_LABELS:
+            for item in (provider.list_by_state(repo, state_label) or []):  # type: ignore[attr-defined]
+                key = str(item.get("key", ""))
+                if key and key not in seen:
+                    seen.add(key)
+                    in_progress.append(item)
+    except Exception as exc:
+        logger.warning(
+            "deployment: não foi possível listar issues em andamento de %s (%s) — fail-closed",
+            repo, exc,
+        )
+        return False
+
+    for item in in_progress:
+        issue = _normalized_to_issue(item)
+        if issue["number"] == 0:
+            continue
+        if _is_session_dead(dev_root, repo, issue["number"], provider, issue, cfg=cfg):
+            _recover_dead_session(provider, repo, issue, ctx, chat_id)
+            recovered_any = True
+    return recovered_any
+
+
+def _normalized_to_issue(item: dict) -> dict:
+    """Converte um item normalizado do provider no dict mínimo do dispatch."""
+    import re as _re
+
+    key = str(item.get("key", ""))
+    m = _re.search(r"[#\-/](\d+)$", key)
+    number = int(m.group(1)) if m else 0
+    return {"number": number, "title": item.get("title", ""), "url": key}
 
 
 def _dispatch(
@@ -867,6 +1309,9 @@ def run(ctx: object) -> None:
             logger.error("deployment: erro no rebrand de %s: %s", result.item.key, exc)
 
     # ── Dispatch do executor de dev ───────────────────────────────────────
+    # Concorrência dirigida por ESTADO (issue #90): o cap global (max_conc)
+    # continua como teto grosso, mas a decisão por-repo vem do estado da issue,
+    # não do mtime do lock. O lock vira backstop curto anti-duplo-dispatch.
     vagas = (max_conc - _active_sessions()) if auto else 0
     disparadas: list[tuple[str, dict]] = []
     adiadas: list[tuple[str, dict]] = []
@@ -878,22 +1323,13 @@ def run(ctx: object) -> None:
         if vagas <= 0:
             adiadas.append((repo, issue))
             continue
-        if one_per_repo and _repo_has_active(repo):
+        allowed = _dev_dispatch_allowed(
+            ctx, provider, repo, issue, cfg, one_per_repo, chat_id
+        )
+        if allowed == "queue":
             adiadas.append((repo, issue))
             continue
-        if _pr_exists(repo, issue["number"]):
-            logger.info(
-                "deployment: PR duplicado detectado para %s#%s — pulando dispatch",
-                repo, issue["number"],
-            )
-            continue
-        # Verifica headroom de recursos antes de cada dispatch (posture critical = skip)
-        if not _resource_headroom_ok(ctx, max_conc):
-            logger.warning(
-                "deployment: headroom crítico — issue %s#%s adiada",
-                repo, issue["number"],
-            )
-            adiadas.append((repo, issue))
+        if allowed == "skip":
             continue
         # Remove worktree órfão de execução anterior antes de criar o novo
         _clean_stale_worktree(dev_root, repo, issue["number"])
@@ -2256,6 +2692,7 @@ def _run_stage(ctx: object, stage: str) -> None:
     vm = f" (voice_maybe chat_id {chat_id}, intent auto)" if chat_id else ""
 
     if stage == _STAGE_DEV:
+        # Concorrência dirigida por ESTADO (issue #90) — idêntico ao run().
         vagas = (max_conc - _active_sessions()) if auto else 0
         disparadas: list = []
         adiadas: list = []
@@ -2267,13 +2704,13 @@ def _run_stage(ctx: object, stage: str) -> None:
             if vagas <= 0:
                 adiadas.append((repo, issue))
                 continue
-            if one_per_repo and _repo_has_active(repo):
+            allowed = _dev_dispatch_allowed(
+                ctx, provider, repo, issue, cfg, one_per_repo, chat_id
+            )
+            if allowed == "queue":
                 adiadas.append((repo, issue))
                 continue
-            if _pr_exists(repo, issue["number"]):
-                continue
-            if not _resource_headroom_ok(ctx, max_conc):
-                adiadas.append((repo, issue))
+            if allowed == "skip":
                 continue
             _clean_stale_worktree(dev_root, repo, issue["number"])
             try:

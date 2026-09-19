@@ -41,7 +41,16 @@ workflow_params:
 # Limites de segurança
 max_concurrent_tasks: 2  # máx de tasks em paralelo ao mesmo tempo (global; alias: max_concurrent)
 max_turns_per_task: 60   # teto duro de turnos por sessão disparada
-one_per_repo: true       # no máx 1 sessão ativa por repo
+one_per_repo: true       # no máx 1 sessão ativa por repo (avaliado pelo ESTADO da issue)
+
+# Concorrência dirigida por estado (issue #90):
+# A VERDADE de concorrência é o ESTADO da issue (label crewflow:running / crewflow:dev),
+# não o mtime do lock. O lock/arquivo de sessão é apenas um backstop curto contra
+# duplo-dispatch. O timeout abaixo é usado SÓ como DETECTOR de sessão morta — nunca
+# libera a fila por tempo. Uma sessão em crewflow:running sem PR aberto, sem worktree
+# ativo, sem escrita recente na sessão E rodando há mais que este timeout é considerada
+# morta e a issue é recolocada em crewflow:todo para re-dispatch limpo.
+# dead_session_minutes: 40   # default: 40 min (alias em segundos: dead_session_secs)
 
 # Customização do prompt de dispatch (opcional)
 # Texto adicional appendado ao final do prompt base enviado à sessão one-shot.

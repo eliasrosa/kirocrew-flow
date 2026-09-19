@@ -147,7 +147,18 @@ novo push, a label é removida e a próxima varredura dispara nova análise.
 ## Travas de segurança
 
 - `auto_dispatch=false` por padrão (só avisa até você confiar).
-- `max_concurrent` (default 2) e **1 sessão por repo**.
+- `max_concurrent` (default 2) — teto grosso global de tasks em paralelo.
+- **1 task por repo por estado** (`one_per_repo`): a concorrência é decidida pelo
+  **ESTADO da issue** (label `crewflow:running` / `crewflow:dev`), não pelo mtime do
+  lock. Uma issue em andamento ocupa a única vaga do repo. O arquivo de sessão/lock
+  vira apenas um **backstop curto** anti-duplo-dispatch (segundos), nunca o liberador
+  da fila.
+- **Detector de sessão morta** (`dead_session_minutes`, default 40 min): usado SÓ para
+  detectar sessões travadas, nunca para liberar a fila por tempo. Uma sessão em
+  `crewflow:running` sem PR aberto **e** sem worktree ativo **e** sem escrita recente na
+  sessão **e** rodando há mais que o timeout é considerada morta; a issue volta para
+  `crewflow:todo` (removendo `crewflow:running`) e é notificada, liberando o próximo
+  ciclo para re-despachar. Qualquer sinal incerto **falha fechado** (não re-despacha).
 - `max_turns_per_task` — teto duro por sessão.
 - Worktree isolado + ordem de nunca tocar outros worktrees/branches.
 - **Nenhum deploy automatizado** — trava de produto, não de config.

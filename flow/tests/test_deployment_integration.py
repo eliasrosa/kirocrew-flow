@@ -1901,3 +1901,476 @@ class TestParallelDispatchIsolation:
             run(ctx)
 
         assert mock_dispatch.call_count == 1
+
+
+# ===========================================================================
+# Concorrência dirigida por ESTADO (issue #90) — FEAT-002
+# ===========================================================================
+
+from deployment.deployment import (  # noqa: E402
+    _DEAD_SESSION_SECS_DEFAULT,
+    _dead_session_secs,
+    _dev_dispatch_allowed,
+    _is_session_dead,
+    _recover_dead_session,
+    _state_allows_dispatch,
+)
+
+
+def _running_state_body(short_repo: str = "repo-a", minutes_ago: int = 120) -> str:
+    """Renderiza um state_comment com uma transição para crewflow:running no passado."""
+    from datetime import UTC, datetime, timedelta
+
+    from flow.audit.state_comment import StateComment, render
+
+    when = (datetime.now(tz=UTC) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M")
+    sc = StateComment(
+        workflow="feature (v1)", current_node="dev", status="running", repo=short_repo,
+    )
+    sc.add_transition(
+        from_state="crewflow:todo", to_state="crewflow:running", actor="system", when=when,
+    )
+    return render(sc)
+
+
+def _running_item(url: str, title: str = "[repo-a] busy") -> dict:
+    """Item normalizado de uma issue em andamento (carrega crewflow:running)."""
+    return {
+        "key": url,
+        "title": title,
+        "labels": ["crewflow:dev", "crewflow:running"],
+        "state_comment": None,
+        "parent_key": None,
+    }
+
+
+class TestDeadSessionSecsConfig:
+    """_dead_session_secs: default 40 min, sobrescrevível via config."""
+
+    def test_default_40_min(self) -> None:
+        assert _dead_session_secs(None) == _DEAD_SESSION_SECS_DEFAULT == 2400
+
+    def test_override_por_segundos(self) -> None:
+        assert _dead_session_secs({"dead_session_secs": 90}) == 90
+
+    def test_override_por_minutos(self) -> None:
+        assert _dead_session_secs({"dead_session_minutes": 10}) == 600
+
+    def test_segundos_tem_precedencia_sobre_minutos(self) -> None:
+        assert _dead_session_secs({"dead_session_secs": 120, "dead_session_minutes": 99}) == 120
+
+    def test_valor_invalido_cai_no_default(self) -> None:
+        assert _dead_session_secs({"dead_session_secs": "abc"}) == _DEAD_SESSION_SECS_DEFAULT
+        assert _dead_session_secs({"dead_session_secs": -5}) == _DEAD_SESSION_SECS_DEFAULT
+
+
+class TestStateDrivenDispatchGate:
+    """(1) TRANSIÇÃO DIRIGIDA POR ESTADO — one_per_repo avaliado pelo estado da issue."""
+
+    def test_repo_livre_permite_dispatch(self) -> None:
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = []
+        assert _state_allows_dispatch(provider, "owner/repo-a", one_per_repo=True) is True
+
+    def test_repo_com_issue_running_esta_ocupado(self) -> None:
+        provider = mock.MagicMock()
+
+        def _by_state(repo: str, state: str) -> list[dict]:
+            if state == "crewflow:running":
+                return [_running_item("https://github.com/owner/repo-a/issues/7")]
+            return []
+
+        provider.list_by_state.side_effect = _by_state
+        assert _state_allows_dispatch(provider, "owner/repo-a", one_per_repo=True) is False
+
+    def test_one_per_repo_desligado_sempre_permite(self) -> None:
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = [
+            _running_item("https://github.com/owner/repo-a/issues/7")
+        ]
+        assert _state_allows_dispatch(provider, "owner/repo-a", one_per_repo=False) is True
+
+    def test_falha_do_provider_fecha_fechado(self) -> None:
+        """Consulta ao provider levanta → None (fail-closed, não despacha)."""
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = RuntimeError("gh down")
+        assert _state_allows_dispatch(provider, "owner/repo-a", one_per_repo=True) is None
+
+    def test_segunda_issue_no_mesmo_repo_e_enfileirada(self) -> None:
+        """run(): duas issues no MESMO repo — a segunda é enfileirada (repo ocupado)."""
+        ctx = mock.MagicMock()
+        ctx._port = 5000
+        ctx._secret = "secret"
+        ctx.job.id = "test-job"
+
+        result_a = _make_dispatch_scan_result(
+            key="https://github.com/owner/repo-a/issues/1", title="[repo-a] A",
+        )
+        result_b = _make_dispatch_scan_result(
+            key="https://github.com/owner/repo-a/issues/2", title="[repo-a] B",
+        )
+        cfg = {
+            "repos": ["owner/repo-a"],
+            "auto_dispatch": True,
+            "max_concurrent_tasks": 5,
+            "one_per_repo": True,
+            "notify_chat_id": "",
+            "squad_id": "test",
+            "issue_provider": "github",
+            "dev_root": "/tmp/dev",
+            "agent": "kirocrew",
+        }
+
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = []  # repo começa livre
+
+        # Depois da 1ª dispatch, o gate por estado passa a reportar o repo ocupado.
+        state = {"busy": False}
+
+        def _gate(prov: object, repo: str, one_per_repo: bool) -> bool:
+            return not state["busy"]
+
+        def _dispatch_side_effect(*args: object, **kwargs: object) -> None:
+            state["busy"] = True
+
+        with (
+            mock.patch("deployment.deployment._load_config", return_value=cfg),
+            mock.patch("deployment.deployment.scan_candidates",
+                       return_value=[result_a, result_b]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for", return_value=provider),
+            mock.patch("deployment.deployment._active_sessions", return_value=0),
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=None),
+            mock.patch("deployment.deployment._state_allows_dispatch", side_effect=_gate),
+            mock.patch("deployment.deployment._resource_headroom_ok", return_value=True),
+            mock.patch("deployment.deployment._clean_stale_worktree"),
+            mock.patch("deployment.deployment._dispatch",
+                       side_effect=_dispatch_side_effect) as mock_dispatch,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            run(ctx)
+
+        # Apenas a primeira issue foi despachada; a segunda ficou na fila.
+        assert mock_dispatch.call_count == 1
+
+
+class TestDeadSessionDetection:
+    """(2) DETECÇÃO DE SESSÃO MORTA — só True quando os 4 sinais valem."""
+
+    def _provider_running(self, minutes_ago: int) -> mock.MagicMock:
+        provider = mock.MagicMock()
+        provider.get_state_comment.return_value = _running_state_body(minutes_ago=minutes_ago)
+        return provider
+
+    def test_morta_quando_todos_sinais_batem(self, tmp_path: Path) -> None:
+        provider = self._provider_running(minutes_ago=120)  # >40min
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=False),
+        ):
+            issue = {"number": 7, "title": "[repo-a] busy",
+                     "url": "https://github.com/owner/repo-a/issues/7"}
+            assert _is_session_dead(str(tmp_path), "owner/repo-a", 7, provider, issue) is True
+
+    def test_nao_morta_se_pr_aberto(self, tmp_path: Path) -> None:
+        provider = self._provider_running(minutes_ago=120)
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=True),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=False),
+        ):
+            issue = {"number": 7, "title": "x",
+                     "url": "https://github.com/owner/repo-a/issues/7"}
+            assert _is_session_dead(str(tmp_path), "owner/repo-a", 7, provider, issue) is False
+
+    def test_nao_morta_se_worktree_ativo(self, tmp_path: Path) -> None:
+        provider = self._provider_running(minutes_ago=120)
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=True),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=False),
+        ):
+            issue = {"number": 7, "title": "x",
+                     "url": "https://github.com/owner/repo-a/issues/7"}
+            assert _is_session_dead(str(tmp_path), "owner/repo-a", 7, provider, issue) is False
+
+    def test_nao_morta_se_escrita_recente(self, tmp_path: Path) -> None:
+        provider = self._provider_running(minutes_ago=120)
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=True),
+        ):
+            issue = {"number": 7, "title": "x",
+                     "url": "https://github.com/owner/repo-a/issues/7"}
+            assert _is_session_dead(str(tmp_path), "owner/repo-a", 7, provider, issue) is False
+
+    def test_nao_morta_se_running_recente(self, tmp_path: Path) -> None:
+        """crewflow:running há menos que o timeout → não morta."""
+        provider = self._provider_running(minutes_ago=5)  # <40min
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=False),
+        ):
+            issue = {"number": 7, "title": "x",
+                     "url": "https://github.com/owner/repo-a/issues/7"}
+            assert _is_session_dead(str(tmp_path), "owner/repo-a", 7, provider, issue) is False
+
+
+class TestFailClosedAmbiguity:
+    """(4) FAIL-CLOSED em sinal incerto — não declara morta, não despacha."""
+
+    def test_state_comment_ilegivel_nao_declara_morta(self, tmp_path: Path) -> None:
+        provider = mock.MagicMock()
+        provider.get_state_comment.side_effect = RuntimeError("gh timeout")
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=False),
+        ):
+            issue = {"number": 7, "title": "x",
+                     "url": "https://github.com/owner/repo-a/issues/7"}
+            # idade de running desconhecida → fail-closed
+            assert _is_session_dead(str(tmp_path), "owner/repo-a", 7, provider, issue) is False
+
+    def test_worktree_incerto_nao_declara_morta(self, tmp_path: Path) -> None:
+        provider = mock.MagicMock()
+        provider.get_state_comment.return_value = _running_state_body(minutes_ago=120)
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=None),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=False),
+        ):
+            issue = {"number": 7, "title": "x",
+                     "url": "https://github.com/owner/repo-a/issues/7"}
+            assert _is_session_dead(str(tmp_path), "owner/repo-a", 7, provider, issue) is False
+
+    def test_gate_provider_incerto_enfileira(self) -> None:
+        """_dev_dispatch_allowed com estado incerto → 'queue' (não despacha)."""
+        ctx = mock.MagicMock()
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = RuntimeError("gh down")
+        cfg = {"dev_root": "/tmp/dev", "max_concurrent_tasks": 2}
+        issue = {"number": 7, "title": "x",
+                 "url": "https://github.com/owner/repo-a/issues/7"}
+        with mock.patch("deployment.deployment._pr_exists", return_value=False):
+            decision = _dev_dispatch_allowed(
+                ctx, provider, "owner/repo-a", issue, cfg, one_per_repo=True,
+            )
+        assert decision == "queue"
+
+
+class TestRecoverDeadSession:
+    """(2b) RECUPERAÇÃO — remove crewflow:running e recoloca em crewflow:todo."""
+
+    def test_recover_move_para_todo_e_remove_running(self) -> None:
+        provider = mock.MagicMock()
+        provider.get_work_item.return_value = {
+            "key": "https://github.com/owner/repo-a/issues/7",
+            "title": "[repo-a] busy",
+            "labels": ["crewflow:dev", "crewflow:running"],
+        }
+        provider.get_state_comment.return_value = _running_state_body(minutes_ago=120)
+        ctx = mock.MagicMock()
+        issue = {"number": 7, "title": "[repo-a] busy",
+                 "url": "https://github.com/owner/repo-a/issues/7"}
+
+        _recover_dead_session(provider, "owner/repo-a", issue, ctx, chat_id="C1")
+
+        provider.set_labels.assert_called_once()
+        _proj, _key, new_labels = provider.set_labels.call_args[0]
+        assert "crewflow:running" not in new_labels
+        assert "crewflow:dev" not in new_labels
+        assert "crewflow:todo" in new_labels
+        provider.upsert_state_comment.assert_called_once()
+        ctx.notify.assert_called_once()
+
+
+class TestAntiDoubleDispatch:
+    """(3) ANTI-DUPLO-DISPATCH — backstop curto impede redisparo em segundos."""
+
+    def test_backstop_impede_redisparo(self) -> None:
+        ctx = mock.MagicMock()
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = []  # repo livre por estado
+        cfg = {"dev_root": "/tmp/dev", "max_concurrent_tasks": 2}
+        issue = {"number": 7, "title": "x",
+                 "url": "https://github.com/owner/repo-a/issues/7"}
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            # escrita da sessão dentro do backstop → 'skip'
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=True),
+        ):
+            decision = _dev_dispatch_allowed(
+                ctx, provider, "owner/repo-a", issue, cfg, one_per_repo=True,
+            )
+        assert decision == "skip"
+
+    def test_sem_backstop_permite_dispatch(self) -> None:
+        ctx = mock.MagicMock()
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = []
+        cfg = {"dev_root": "/tmp/dev", "max_concurrent_tasks": 2}
+        issue = {"number": 7, "title": "x",
+                 "url": "https://github.com/owner/repo-a/issues/7"}
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=None),
+            mock.patch("deployment.deployment._resource_headroom_ok", return_value=True),
+        ):
+            decision = _dev_dispatch_allowed(
+                ctx, provider, "owner/repo-a", issue, cfg, one_per_repo=True,
+            )
+        assert decision == "dispatch"
+
+    def test_pr_duplicado_gera_skip(self) -> None:
+        ctx = mock.MagicMock()
+        provider = mock.MagicMock()
+        cfg = {"dev_root": "/tmp/dev", "max_concurrent_tasks": 2}
+        issue = {"number": 7, "title": "x",
+                 "url": "https://github.com/owner/repo-a/issues/7"}
+        with mock.patch("deployment.deployment._pr_exists", return_value=True):
+            decision = _dev_dispatch_allowed(
+                ctx, provider, "owner/repo-a", issue, cfg, one_per_repo=True,
+            )
+        assert decision == "skip"
+
+
+class TestDeadSessionDoesNotTrapQueue:
+    """(5) SESSÃO MORTA NÃO PRENDE A FILA — recuperação libera o próximo ciclo."""
+
+    def test_repo_ocupado_com_sessao_morta_e_recuperado(self) -> None:
+        """Repo ocupado por issue morta → _dev_dispatch_allowed recupera e enfileira;
+        o próximo ciclo (repo livre) despacha."""
+        ctx = mock.MagicMock()
+        provider = mock.MagicMock()
+        # Repo ocupado: issue #9 em running.
+        provider.list_by_state.side_effect = lambda repo, state: (
+            [_running_item("https://github.com/owner/repo-a/issues/9")]
+            if state == "crewflow:running" else []
+        )
+        provider.get_work_item.return_value = {
+            "key": "https://github.com/owner/repo-a/issues/9",
+            "title": "[repo-a] dead",
+            "labels": ["crewflow:dev", "crewflow:running"],
+        }
+        provider.get_state_comment.return_value = _running_state_body(minutes_ago=120)
+        cfg = {"dev_root": "/tmp/dev", "max_concurrent_tasks": 2}
+        issue = {"number": 10, "title": "x",
+                 "url": "https://github.com/owner/repo-a/issues/10"}
+
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=False),
+        ):
+            # Ciclo 1: repo ocupado por sessão morta → recupera, mas enfileira.
+            decision1 = _dev_dispatch_allowed(
+                ctx, provider, "owner/repo-a", issue, cfg, one_per_repo=True,
+            )
+        assert decision1 == "queue"
+        # A recuperação recolocou a issue morta em crewflow:todo.
+        provider.set_labels.assert_called_once()
+        _proj, _key, new_labels = provider.set_labels.call_args[0]
+        assert "crewflow:running" not in new_labels
+        assert "crewflow:todo" in new_labels
+
+        # Ciclo 2: repo agora livre (issue recuperada saiu de running) → despacha.
+        provider2 = mock.MagicMock()
+        provider2.list_by_state.return_value = []
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=None),
+            mock.patch("deployment.deployment._resource_headroom_ok", return_value=True),
+        ):
+            decision2 = _dev_dispatch_allowed(
+                ctx, provider2, "owner/repo-a", issue, cfg, one_per_repo=True,
+            )
+        assert decision2 == "dispatch"
+
+    def test_recuperacao_via_mesmo_provider_libera_redispatch(self) -> None:
+        """(finding 4) Prova end-to-end: a ESCRITA REAL de labels feita pela
+        recuperação (set_labels no MESMO provider) é o que faz o próximo
+        _dev_dispatch_allowed retornar 'dispatch'.
+
+        Em vez de trocar por um provider "fresco" no ciclo 2, mantemos UM ÚNICO
+        provider com estado de labels mutável: list_by_state lê o estado atual,
+        set_labels muta esse estado. Assim, a transição running→todo escrita por
+        _recover_dead_session realimenta a próxima consulta de estado."""
+        ctx = mock.MagicMock()
+        dead_key = "https://github.com/owner/repo-a/issues/9"
+
+        # Estado de labels compartilhado (source of truth do provider mock).
+        label_store: dict[str, list[str]] = {
+            dead_key: ["crewflow:dev", "crewflow:running"],
+        }
+
+        def _item_for(key: str) -> dict:
+            return {
+                "key": key,
+                "title": "[repo-a] dead",
+                "labels": list(label_store.get(key, [])),
+                "state_comment": None,
+                "parent_key": None,
+            }
+
+        provider = mock.MagicMock()
+
+        # list_by_state deriva do estado ATUAL de label_store (como um provider real).
+        def _list_by_state(repo: str, state: str) -> list[dict]:
+            return [
+                _item_for(key)
+                for key, labels in label_store.items()
+                if state in labels
+            ]
+
+        provider.list_by_state.side_effect = _list_by_state
+        provider.get_work_item.side_effect = lambda repo, num: _item_for(dead_key)
+        provider.get_state_comment.return_value = _running_state_body(minutes_ago=120)
+
+        # set_labels ESCREVE de volta no estado compartilhado (efeito real).
+        def _set_labels(repo: str, key: str, labels: list[str]) -> None:
+            label_store[key] = list(labels)
+
+        provider.set_labels.side_effect = _set_labels
+
+        cfg = {"dev_root": "/tmp/dev", "max_concurrent_tasks": 2}
+        issue = {"number": 10, "title": "x",
+                 "url": "https://github.com/owner/repo-a/issues/10"}
+
+        # Sanidade: antes da recuperação, o repo está ocupado por estado.
+        assert _state_allows_dispatch(provider, "owner/repo-a", one_per_repo=True) is False
+
+        # Ciclo 1: sessão morta é detectada e recuperada (escreve labels reais);
+        # o ciclo atual ainda enfileira para não competir com a recuperação.
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._worktree_is_active", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=False),
+        ):
+            decision1 = _dev_dispatch_allowed(
+                ctx, provider, "owner/repo-a", issue, cfg, one_per_repo=True,
+            )
+        assert decision1 == "queue"
+
+        # A escrita real removeu running/dev e adicionou todo NO MESMO provider.
+        assert label_store[dead_key] == ["crewflow:todo"]
+        # E o estado agora reporta o repo como LIVRE (sem trocar de provider).
+        assert _state_allows_dispatch(provider, "owner/repo-a", one_per_repo=True) is True
+
+        # Ciclo 2: MESMO provider, cujo estado foi realimentado pela recuperação
+        # do ciclo 1 → o gate real retorna 'dispatch' por causa da escrita real.
+        with (
+            mock.patch("deployment.deployment._pr_exists", return_value=False),
+            mock.patch("deployment.deployment._session_write_is_recent", return_value=None),
+            mock.patch("deployment.deployment._resource_headroom_ok", return_value=True),
+        ):
+            decision2 = _dev_dispatch_allowed(
+                ctx, provider, "owner/repo-a", issue, cfg, one_per_repo=True,
+            )
+        assert decision2 == "dispatch"

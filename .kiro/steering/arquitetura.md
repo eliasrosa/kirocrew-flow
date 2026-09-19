@@ -234,10 +234,34 @@ python3 -m ruff check flow/ && python3 -m mypy flow/ --ignore-missing-imports &&
   e `executor.decide()` — toda a lógica de negócio já está nos módulos.
 - **Workspace isolado (Fase 2):** cada dispatch cria um worktree efêmero em
   `<dev_root>/.esteira-worktrees/<repo-short>-<issue_number>`. Use sempre
-  `_worktree_path(dev_root, repo, issue_number)` para construir o caminho — é a
+  `_worktree_path(dev_root, repo, issue_number)` para construir o caminho: é a
   fonte única de verdade, usada tanto pelo deployment quanto pelo prompt da sessão.
   O `deployment.py` limpa worktrees órfãos via `_clean_stale_worktree()` antes de
-  cada dispatch. Use `max_concurrent_tasks` na config (alias de `max_concurrent`).
+  cada dispatch. Use `max_concurrent_tasks` na config (alias de `max_concurrent`)
+  como teto grosso global.
+- **Concorrência dirigida por estado (issue #90):** toda a lógica de concorrência
+  vive em `deployment/deployment.py`, nunca em `flow/domain/`. A VERDADE de
+  concorrência é o ESTADO da issue, não o mtime de um lock:
+  - **`one_per_repo` por estado:** `_state_allows_dispatch()` consulta o provider por
+    issues em `_IN_PROGRESS_LABELS` (`crewflow:running` / `crewflow:dev`). Se qualquer
+    uma existir, o repo está ocupado (a única vaga já está tomada). Consulta que falha
+    retorna `None` e o chamador falha fechado (trata o repo como ocupado).
+  - **Lock como backstop curto:** o arquivo de sessão sob `_sessdir()` é só um backstop
+    anti-duplo-dispatch de `_DISPATCH_BACKSTOP_SECS` (10s), para evitar que dois ciclos
+    de cron disparem o MESMO slot em segundos. Ele nunca é o liberador da fila.
+  - **Detector de sessão morta (NÃO liberador de fila):** `_is_session_dead()` usa um
+    timeout longo `_DEAD_SESSION_SECS_DEFAULT` (2400s = 40 min), configurável via
+    `dead_session_minutes` / `dead_session_secs` e resolvido por `_dead_session_secs(cfg)`.
+    Uma sessão só é considerada morta quando TODOS os sinais batem: sem PR aberto
+    (`_pr_exists`) **e** sem worktree ativo (`_worktree_is_active`) **e** sem escrita
+    recente na sessão (`_session_write_is_recent`) **e** rodando em `crewflow:running`
+    há mais que o timeout (`_running_age_secs`). Qualquer sinal incerto retorna `False`:
+    prefere estagnar a duplo-despachar (**fail-closed**).
+  - **Recuperação:** `_recover_dead_session()` recoloca a issue em `crewflow:todo`
+    (removendo `crewflow:running` / `crewflow:dev`), anexa a transição de auditoria no
+    state_comment e notifica. O gate `_dev_dispatch_allowed()` orquestra tudo isso e
+    devolve `dispatch` / `queue` / `skip`; a fila só é liberada no ciclo seguinte, nunca
+    por tempo. Consistente com `fluxo.md` (Travas de segurança) e o README.
 
 ## Prompts externalizados — `flow/prompts/`
 

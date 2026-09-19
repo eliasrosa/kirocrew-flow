@@ -59,6 +59,14 @@ squads/*.yaml → SquadConfig → scan_candidates() → executor.decide() → de
 
 A sessão one-shot **nunca mergeia e nunca faz deploy**. Ela entrega o PR em `crewflow:review` e encerra.
 
+### Concorrência dirigida por estado
+
+Como **a issue É o estado** (princípio #1), a concorrência também é decidida pelo estado:
+
+- **1 task por repo por estado** (`one_per_repo`): uma issue em andamento (`crewflow:running` / `crewflow:dev`) ocupa a única vaga do repo. A decisão vem do **estado da issue**, não do mtime de um lock. O arquivo de sessão/lock é só um **backstop curto** contra duplo-dispatch (dois ciclos de cron disparando o mesmo slot em segundos).
+- `max_concurrent_tasks` (default 2) continua como teto grosso global.
+- **Detector de sessão morta** (`dead_session_minutes`, default 40 min): usado apenas para destravar sessões mortas, nunca para liberar a fila por tempo. Uma sessão em `crewflow:running` sem PR aberto **e** sem worktree ativo **e** sem escrita recente na sessão **e** rodando há mais que o timeout é considerada morta: a issue volta para `crewflow:todo` (removendo `crewflow:running`) com nota de auditoria e notificação, liberando o próximo ciclo para re-despachar limpo. Qualquer sinal incerto **falha fechado** — prefere estagnar a duplo-despachar.
+
 ## Fluxos disponíveis (Fase 1)
 
 | Template | Quando usar |
