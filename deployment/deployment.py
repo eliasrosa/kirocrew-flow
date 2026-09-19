@@ -49,6 +49,7 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 
 logger = logging.getLogger(__name__)
@@ -593,9 +594,6 @@ def _pr_exists(repo: str, issue_number: int) -> bool:
 
     Retorna True se qualquer das duas buscas encontrar ao menos uma PR aberta.
     """
-    import json as _json
-    import subprocess
-
     branch = f"feat/issue-{issue_number}"
 
     def _run_gh_pr_list(extra_args: list[str]) -> list[dict]:
@@ -612,7 +610,7 @@ def _pr_exists(repo: str, issue_number: int) -> bool:
                     repo, " ".join(extra_args), result.stderr.strip(),
                 )
                 return []
-            return _json.loads(result.stdout or "[]")
+            return json.loads(result.stdout or "[]")
         except Exception as exc:
             logger.warning(
                 "deployment: erro em gh pr list para %s (%s): %s",
