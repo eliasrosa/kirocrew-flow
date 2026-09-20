@@ -101,9 +101,6 @@ def register_routes(ctx: object) -> list:
 async def handle_health(request: web.Request, ctx: object = None) -> web.Response:
     return web.json_response({"ok": True, "app": "kirocrew-flow", "version": "1.0.0"})
 
-    app.on_startup.append(_start_loops)
-    app.on_cleanup.append(_stop_loops)
-
 
 def _extract_issue_number(raw: dict) -> int | str:
     """Extrai o número inteiro da issue do objeto raw do scan.
