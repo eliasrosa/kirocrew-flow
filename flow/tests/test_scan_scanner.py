@@ -7,10 +7,16 @@ from unittest import mock
 
 import pytest
 
-from flow.domain.state import State
+from flow.domain.state import Modifier, State
 from flow.ports.issue_provider import ProviderError
 from flow.scan.cache import _SCHEMA, compute_hash, set_hash
-from flow.scan.scanner import ALWAYS_INCLUDE_STATES, ScanResult, SquadScanConfig, scan_candidates
+from flow.scan.scanner import (
+    ALWAYS_INCLUDE_MODIFIERS,
+    ALWAYS_INCLUDE_STATES,
+    ScanResult,
+    SquadScanConfig,
+    scan_candidates,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -324,3 +330,163 @@ class TestAlwaysIncludeStates:
 
         assert len(results) == 1
         assert results[0].dispatch_candidate is False
+
+
+# ---------------------------------------------------------------------------
+# Resultado de review sem label de estado — issue de review do modelo de
+# label único (crewflow:review-ok / crewflow:review-fail SUBSTITUEM
+# crewflow:review). Estas issues não têm State, mas DEVEM sobreviver ao scan
+# para que run_merge (REVIEW_OK) e run_conflito/rework (REVIEW_FAIL) as peguem.
+# Regressão coberta: antes, _fetch_all_labeled_items só consultava por State e
+# _evaluate_item descartava current_state is None, então elas sumiam da esteira.
+# ---------------------------------------------------------------------------
+
+class TestReviewResultLabels:
+    def test_always_include_modifiers_contem_review_ok_e_fail(self) -> None:
+        assert Modifier.REVIEW_OK in ALWAYS_INCLUDE_MODIFIERS
+        assert Modifier.REVIEW_FAIL in ALWAYS_INCLUDE_MODIFIERS
+
+    def test_review_ok_sem_estado_e_emitido(
+        self, config: SquadScanConfig, conn: sqlite3.Connection
+    ) -> None:
+        """Issue com APENAS {crewflow:review-ok} (sem crewflow:review) é emitida."""
+        item = _item("VGAT-1", labels=["crewflow:review-ok"])
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = (
+            lambda p, s: [item] if s == "crewflow:review-ok" else []
+        )
+
+        results = scan_candidates(config, provider, conn)
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.item.key == "VGAT-1"
+        assert r.current_state is None  # sem label de estado, como em produção
+        assert Modifier.REVIEW_OK in r.modifiers
+        assert r.dispatch_candidate is False
+
+    def test_review_fail_sem_estado_e_emitido(
+        self, config: SquadScanConfig, conn: sqlite3.Connection
+    ) -> None:
+        """Issue com APENAS {crewflow:review-fail} (sem crewflow:review) é emitida."""
+        item = _item("VGAT-1", labels=["crewflow:review-fail"])
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = (
+            lambda p, s: [item] if s == "crewflow:review-fail" else []
+        )
+
+        results = scan_candidates(config, provider, conn)
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.item.key == "VGAT-1"
+        assert r.current_state is None
+        assert Modifier.REVIEW_FAIL in r.modifiers
+
+    def test_review_ok_incluido_sem_mudanca_de_labels(
+        self, config: SquadScanConfig, conn: sqlite3.Connection
+    ) -> None:
+        """review-ok deve reaparecer em todo ciclo mesmo com hash inalterado."""
+        labels = ["crewflow:review-ok", "crewflow:feature"]
+        item = _item("VGAT-1", labels=labels)
+        # Simula segundo ciclo: hash já gravado no cache.
+        set_hash(conn, "VGAT-1", compute_hash(labels))
+
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = (
+            lambda p, s: [item] if s == "crewflow:review-ok" else []
+        )
+
+        results = scan_candidates(config, provider, conn)
+
+        assert len(results) == 1
+        assert results[0].changed is False  # hash igual — mas ainda incluída
+        assert Modifier.REVIEW_OK in results[0].modifiers
+
+    def test_review_fail_reaparece_em_multiplos_ciclos(
+        self, config: SquadScanConfig, conn: sqlite3.Connection
+    ) -> None:
+        labels = ["crewflow:review-fail"]
+        item = _item("VGAT-1", labels=labels)
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = (
+            lambda p, s: [item] if s == "crewflow:review-fail" else []
+        )
+
+        for ciclo in range(1, 4):
+            results = scan_candidates(config, provider, conn)
+            assert len(results) == 1, f"ciclo {ciclo}: issue deveria aparecer"
+            assert Modifier.REVIEW_FAIL in results[0].modifiers
+
+    def test_review_ok_flui_para_merge_pr(
+        self, config: SquadScanConfig, conn: sqlite3.Connection
+    ) -> None:
+        """A ScanResult produzida pelo scan real dispara MERGE_PR no executor.
+
+        Fecha o gap apontado no review: em vez de forjar current_state=State.REVIEW,
+        deixa o scan produzir current_state=None a partir de labels crus e verifica
+        que decide() ainda decide MERGE_PR sobre o modificador REVIEW_OK.
+        """
+        from flow.executor.executor import ActionKind, decide
+
+        item = _item("VGAT-1", labels=["crewflow:review-ok"])
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = (
+            lambda p, s: [item] if s == "crewflow:review-ok" else []
+        )
+
+        results = scan_candidates(config, provider, conn)
+        assert len(results) == 1
+        scan_result = results[0]
+        assert scan_result.current_state is None  # sem label de estado (produção)
+
+        # Comentário de estado com um ReviewerResult aprovado (auto-mergeável),
+        # construído pelo renderer real para bater com o parser do executor.
+        from flow.audit.state_comment import StateComment, render
+        sc = StateComment(workflow="f", current_node="review", status="reviewed", repo="r")
+        sc.set_reviewer_result(approved=True, comments=[], sha="abc123")
+        state_comment = render(sc)
+
+        decision = decide(
+            scan_result,
+            state_comment=state_comment,
+            auto_merge_on_approve=True,
+        )
+        # A issue sobrevive ao scan (current_state=None) e o branch de REVIEW_OK
+        # é alcançado, decidindo MERGE_PR — não some da esteira.
+        assert decision.action is ActionKind.MERGE_PR
+        assert "crewflow:done" in decision.add_labels
+
+    def test_review_fail_flui_para_rework(
+        self, config: SquadScanConfig, conn: sqlite3.Connection
+    ) -> None:
+        """A ScanResult produzida pelo scan real dispara DISPATCH_REWORK."""
+        from flow.executor.executor import ActionKind, decide
+
+        item = _item("VGAT-1", labels=["crewflow:review-fail"])
+        provider = mock.MagicMock()
+        provider.list_by_state.side_effect = (
+            lambda p, s: [item] if s == "crewflow:review-fail" else []
+        )
+
+        results = scan_candidates(config, provider, conn)
+        assert len(results) == 1
+        scan_result = results[0]
+
+        decision = decide(scan_result)
+        assert decision.action is ActionKind.DISPATCH_REWORK
+        assert "crewflow:running" in decision.add_labels
+        assert "crewflow:review-fail" in decision.remove_labels
+
+    def test_fetch_consulta_labels_de_resultado(
+        self, config: SquadScanConfig, conn: sqlite3.Connection
+    ) -> None:
+        """_fetch_all_labeled_items consulta o provider por review-ok e review-fail."""
+        provider = mock.MagicMock()
+        provider.list_by_state.return_value = []
+
+        scan_candidates(config, provider, conn)
+
+        queried = {c.args[1] for c in provider.list_by_state.call_args_list}
+        assert "crewflow:review-ok" in queried
+        assert "crewflow:review-fail" in queried

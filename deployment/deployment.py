@@ -21,8 +21,8 @@ independentes, cada um responsável por um estágio do fluxo:
 
     run_dev(ctx)       — issues crewflow:todo → dispatch dev (modelo mais forte)
     run_reviewer(ctx)  — PRs crewflow:review → dispatch reviewer (modelo mais rápido)
-    run_merge(ctx)     — crewflow:review + crewflow:reviewed → merge squash
-    run_conflito(ctx)  — crewflow:changes-requested → dispatch rework
+    run_merge(ctx)     — crewflow:review-ok → merge squash
+    run_conflito(ctx)  — crewflow:review-fail → dispatch rework
 
 Vantagens:
   - Observabilidade: cada cron tem log/histórico isolado
@@ -1208,9 +1208,12 @@ def run(ctx: object) -> None:
             Modifier.HML_BYPASS in result.modifiers
             or (hasattr(result.current_state, "__eq__") and result.current_state is State.DEV)
             or (result.current_state is State.TODO and "crewflow:debt" in result.item.labels)
-            # GATE 2: lê o resultado do reviewer quando em review+reviewed
+            # GATE 2: lê o resultado do reviewer quando em review (lock reviewed)
+            # ou quando o reviewer já aplicou o resultado (review-ok/review-fail)
             or (result.current_state is State.REVIEW and Modifier.REVIEWED in result.modifiers)
-            # Ciclo de re-trabalho: lê iterações para checar teto
+            or (Modifier.REVIEW_OK in result.modifiers)
+            or (Modifier.REVIEW_FAIL in result.modifiers)
+            # Ciclo de re-trabalho legado: lê iterações para checar teto
             or (Modifier.CHANGES_REQUESTED in result.modifiers)
         )
         state_comment: str | None = None
@@ -1223,12 +1226,13 @@ def run(ctx: object) -> None:
                     result.item.key,
                 )
 
-        # Busca o SHA do HEAD do PR quando em review+reviewed para que o
-        # executor possa detectar push pós-review sem fazer I/O ele mesmo.
+        # Busca o SHA do HEAD do PR quando em review (lock reviewed) ou quando
+        # o reviewer já aplicou crewflow:review-ok, para que o executor possa
+        # detectar push pós-review sem fazer I/O ele mesmo.
         # Também lê mergeability para detecção de conflito (crewflow:conflito).
         pr_head_sha: str | None = None
         pr_mergeable: str | None = None
-        if result.current_state is State.REVIEW:
+        if result.current_state is State.REVIEW or Modifier.REVIEW_OK in result.modifiers:
             import contextlib
             with contextlib.suppress(Exception):
                 _repo = (
@@ -1887,8 +1891,10 @@ def _reviewer_prompt(repo: str, pr_number: int, issue_number: int, head_sha: str
         "   Use o SHA obtido via `gh pr view {{pr_number}} --repo {{repo}} --json headRefOid` no passo 2\n"
         "   — não {{head_sha}} hardcoded, pois a PR pode ter avançado entre o dispatch e a execução.\n"
         "   IMPORTANTE: o ReviewerResult PERMANECE na issue — é o que o scan lê pra decidir MERGE_PR.\n"
-        "10. Se aprovado (zero comentários + CI verde): adicione a label `crewflow:reviewed` à issue #{{issue_number}}.\n"
-        "11. Se tem comentários ou CI vermelho: NÃO adicione `crewflow:reviewed` — o TL decide.\n"
+        "10. Se aprovado (zero comentários + CI verde): aplique o resultado à issue #{{issue_number}}:\n"
+        "    `gh issue edit {{issue_number}} --repo {{repo}} --add-label \"crewflow:review-ok\" --remove-label \"crewflow:review\"`\n"
+        "11. Se tem comentários ou CI vermelho: aplique o resultado de reprovação:\n"
+        "    `gh issue edit {{issue_number}} --repo {{repo}} --add-label \"crewflow:review-fail\" --remove-label \"crewflow:review\"`\n"
         "12. ENCERRE.\n\n"
         "### Regras críticas\n\n"
         "- UMA passada. Terminou, acabou. NÃO entre em loop.\n"
@@ -1963,14 +1969,14 @@ _REWORK_PROMPT_FALLBACK = (
     "**Não faça push com CI vermelho.**\n"
     "6. Faça commit e push na branch existente:\n"
     "   `git add -A && git commit -m \"fix: aplicar pedidos de mudança do reviewer (iteração {{iteration}})\" && git push origin feat/issue-{{issue_number}}`\n"
-    "   Isso remove automaticamente `crewflow:reviewed` (novo SHA invalida o lock anti-loop).\n"
+    "   Isso invalida o lock anti-loop interno `crewflow:reviewed` (novo SHA).\n"
     "7. Atualize o state_comment da issue incrementando `review_iterations`:\n"
     "   - Leia o comentário atual: `gh issue view {{issue_number}} --repo {{repo}} --comments`\n"
     "   - Incremente o campo `**Iterações de review:**` (ou adicione-o se ausente)\n"
     "   - Adicione uma linha no histórico: `| <data> | rework → review | kiro-dev |`\n"
     "   - Atualize via `gh issue comment {{issue_number}} --repo {{repo}} --body \"...\"` (editando o comentário existente)\n"
-    "8. Troque a label de volta para review:\n"
-    "   `gh issue edit {{issue_number}} --repo {{repo}} --remove-label \"crewflow:running,crewflow:changes-requested\" --add-label \"crewflow:review\"`\n"
+    "8. Troque a label de volta para review (singular, sem combinação):\n"
+    "   `gh issue edit {{issue_number}} --repo {{repo}} --remove-label \"crewflow:running,crewflow:review-fail\" --add-label \"crewflow:review\"`\n"
     "9. Ao terminar: {{notify_step}}\n\n"
     "   remova `crewflow:running`, mantenha `crewflow:review`, e ENCERRE.\n\n"
     "{{vault_step}}\n\n"
@@ -2535,7 +2541,8 @@ def _execute_auto_merges(
     1. Posta resultado do reviewer no PR (e referência curta na issue)
     2. Localiza o PR aberto associado à issue
     3. Faz o merge squash via GitHub API
-    4. Atualiza labels: adiciona crewflow:done, remove crewflow:review e crewflow:reviewed
+    4. Atualiza labels: adiciona crewflow:done, remove crewflow:review-ok
+       (e crewflow:review/crewflow:reviewed remanescentes)
     5. Notifica TL com resultado (sucesso ou falha)
     """
     from flow.adapters import github_client as gh_client
@@ -2582,7 +2589,11 @@ def _execute_auto_merges(
                 new_labels = _apply_state_transition(
                     item_data.get("labels", []),
                     State.DONE,
-                    remove_modifiers=("crewflow:reviewed", "crewflow:running"),
+                    remove_modifiers=(
+                        "crewflow:review-ok",
+                        "crewflow:reviewed",
+                        "crewflow:running",
+                    ),
                 )
                 gh_client.set_labels(repo, str(issue_number), new_labels)
             except Exception as exc:
@@ -2671,7 +2682,7 @@ _STAGE_CONFLITO = "conflito"
 #                          pr_mergeable == "CONFLICTING"; o cron reviewer já lê esse campo.
 #   - dispatch_conflict_resolver → _STAGE_CONFLITO: despachado quando crewflow:conflito
 #                          já foi aplicado na issue (Modifier.CONFLITO presente).
-#   - dispatch_rework    → _STAGE_CONFLITO: re-trabalho pós-review (changes-requested).
+#   - dispatch_rework    → _STAGE_CONFLITO: re-trabalho pós-review (crewflow:review-fail).
 _STAGE_ACTIONS = {
     _STAGE_DEV:      frozenset({"dispatch_dev"}),
     _STAGE_REVIEWER: frozenset({"dispatch_reviewer", "mark_conflito"}),
@@ -2831,6 +2842,8 @@ def _run_stage(ctx: object, stage: str) -> None:
             or (result.current_state is State.DEV)
             or (result.current_state is State.TODO and "crewflow:debt" in result.item.labels)
             or (result.current_state is State.REVIEW and Modifier.REVIEWED in result.modifiers)
+            or (Modifier.REVIEW_OK in result.modifiers)
+            or (Modifier.REVIEW_FAIL in result.modifiers)
             or (Modifier.CHANGES_REQUESTED in result.modifiers)
         )
         state_comment: str | None = None
@@ -2845,7 +2858,7 @@ def _run_stage(ctx: object, stage: str) -> None:
 
         pr_head_sha: str | None = None
         pr_mergeable: str | None = None
-        if result.current_state is State.REVIEW:
+        if result.current_state is State.REVIEW or Modifier.REVIEW_OK in result.modifiers:
             import contextlib
             with contextlib.suppress(Exception):
                 _repo = (
@@ -3239,8 +3252,8 @@ def run_reviewer(ctx: object) -> None:
 def run_merge(ctx: object) -> None:
     """Entrypoint do cron de merge.
 
-    Processa PRs aprovados (``crewflow:review`` + ``crewflow:reviewed`` com
-    ReviewerResult aprovado) e executa o merge squash automático.
+    Processa PRs aprovados (``crewflow:review-ok`` com ReviewerResult
+    aprovado) e executa o merge squash automático.
     Intervalo curto recomendado: 120s.
 
     Configure o modelo via ``stage_models.merge`` na deployment.config.yaml.
@@ -3256,7 +3269,7 @@ def run_merge(ctx: object) -> None:
 def run_conflito(ctx: object) -> None:
     """Entrypoint do cron de re-trabalho (conflito pós-review).
 
-    Processa issues com ``crewflow:changes-requested`` e despacha sessões
+    Processa issues com ``crewflow:review-fail`` e despacha sessões
     one-shot de rework para aplicar os pedidos do reviewer na mesma PR.
     Intervalo recomendado: 300s.
 

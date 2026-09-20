@@ -73,10 +73,12 @@ class Modifier(StrEnum):
 
     BLOCKED           = "crewflow:blocked"           # para tudo — dependência ou espera humana
     RUNNING           = "crewflow:running"            # trabalho em andamento no estado atual
-    REVIEWED          = "crewflow:reviewed"           # lock anti-loop: já analisado neste SHA
+    REVIEWED          = "crewflow:reviewed"           # lock anti-loop INTERNO: já analisado neste SHA
     HML_BYPASS        = "crewflow:hml-bypass"         # exceção auditada: hotfix pulou o HML
-    CHANGES_REQUESTED = "crewflow:changes-requested"  # reviewer pediu mudança — volta pro dev
+    CHANGES_REQUESTED = "crewflow:changes-requested"  # (legado) reviewer pediu mudança — use REVIEW_FAIL
     CONFLITO          = "crewflow:conflito"           # PR tem conflito de merge ou base desatualizada
+    REVIEW_OK         = "crewflow:review-ok"          # reviewer aprovou — pronto para merge
+    REVIEW_FAIL       = "crewflow:review-fail"        # reviewer reprovou — aguarda rework
 
 
 # Modificadores que impedem dispatch mesmo com o estado correto.

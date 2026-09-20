@@ -82,6 +82,7 @@ class TestDecideFeature:
         assert d.action is ActionKind.DISPATCH_REVIEWER
 
     def test_review_marca_reviewed(self) -> None:
+        """DISPATCH_REVIEWER aplica o lock anti-loop interno crewflow:reviewed."""
         r = _result(state=State.REVIEW, labels=["crewflow:review", "crewflow:feature"])
         d = decide(r)
         assert "crewflow:reviewed" in d.add_labels
@@ -122,15 +123,15 @@ class TestDecideFeature:
 
 class TestAntiLoopReviewed:
     def test_review_com_reviewed_sem_resultado_skip(self) -> None:
-        """crewflow:reviewed presente mas sem resultado do reviewer → SKIP (aguardando)."""
+        """crewflow:reviewed (lock interno) presente sem resultado visível → SKIP (aguardando)."""
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         d = decide(r)
         assert d.action is ActionKind.SKIP
-        assert "ainda não disponível" in d.reason
+        assert "aguardando" in d.reason
 
     def test_review_sem_reviewed_despacha(self) -> None:
         r = _result(
@@ -139,6 +140,126 @@ class TestAntiLoopReviewed:
         )
         d = decide(r)
         assert d.action is ActionKind.DISPATCH_REVIEWER
+
+    def test_review_ok_sem_resultado_skip(self) -> None:
+        """crewflow:review-ok presente mas sem ReviewerResult → SKIP (aguardando)."""
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
+        )
+        d = decide(r)
+        assert d.action is ActionKind.SKIP
+        assert "ainda não disponível" in d.reason
+
+
+# ---------------------------------------------------------------------------
+# decide() — labels semânticas de review: review-ok / review-fail
+# ---------------------------------------------------------------------------
+
+class TestReviewResultLabels:
+    def _approved_comment(self, sha: str = "abc123") -> str:
+        from flow.audit.state_comment import StateComment, render
+        sc = StateComment(workflow="f", current_node="review", status="reviewed", repo="r")
+        sc.set_reviewer_result(approved=True, comments=[], sha=sha)
+        return render(sc)
+
+    def _changes_comment(self, sha: str = "abc123") -> str:
+        from flow.audit.state_comment import StateComment, render
+        sc = StateComment(workflow="f", current_node="review", status="reviewed", repo="r")
+        sc.set_reviewer_result(approved=False, comments=["Falta teste"], sha=sha)
+        return render(sc)
+
+    def test_reviewer_aprovado_gera_review_ok_e_remove_review(self) -> None:
+        """DISPATCH_REVIEWER + resultado aprovado: o reviewer aplica review-ok removendo review.
+
+        Esse comportamento é validado pelo prompt; aqui checamos que o executor,
+        vendo review-ok com resultado auto-mergeable, prossegue para MERGE_PR
+        removendo review-ok e review (nenhum estado carrega 2 labels de review).
+        """
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
+        )
+        d = decide(r, state_comment=self._approved_comment(), auto_merge_on_approve=True)
+        assert d.action is ActionKind.MERGE_PR
+        assert "crewflow:review-ok" in d.remove_labels
+        assert "crewflow:review" in d.remove_labels
+
+    def test_review_ok_drives_merge_pr(self) -> None:
+        """Modifier.REVIEW_OK com aprovação → MERGE_PR."""
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
+        )
+        d = decide(r, state_comment=self._approved_comment(), auto_merge_on_approve=True)
+        assert d.action is ActionKind.MERGE_PR
+        assert "crewflow:done" in d.add_labels
+
+    def test_review_ok_sem_auto_merge_skip(self) -> None:
+        """auto_merge_on_approve=False → SKIP mantendo review-ok para merge manual."""
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
+        )
+        d = decide(r, state_comment=self._approved_comment(), auto_merge_on_approve=False)
+        assert d.action is ActionKind.SKIP
+
+    def test_review_ok_com_comentarios_vira_review_fail(self) -> None:
+        """Aprovado com comentários → NOTIFY_HUMAN + troca review-ok por review-fail."""
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
+        )
+        d = decide(r, state_comment=self._changes_comment())
+        assert d.action is ActionKind.NOTIFY_HUMAN
+        assert d.notify_role is HumanRole.TL
+        assert "crewflow:review-fail" in d.add_labels
+        assert "crewflow:review-ok" in d.remove_labels
+
+    def test_review_ok_sha_divergente_redispacha_reviewer(self) -> None:
+        """Push pós-review (SHA divergente) → re-revisão: volta a crewflow:review."""
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
+        )
+        d = decide(
+            r,
+            state_comment=self._approved_comment(sha="abc123"),
+            pr_head_sha="deadbeef9999",
+        )
+        assert d.action is ActionKind.DISPATCH_REVIEWER
+        assert "crewflow:review" in d.add_labels
+        assert "crewflow:review-ok" in d.remove_labels
+
+    def test_review_fail_drives_dispatch_rework(self) -> None:
+        """Modifier.REVIEW_FAIL → DISPATCH_REWORK (add running, remove review-fail)."""
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review-fail", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_FAIL},
+        )
+        d = decide(r, state_comment=None)
+        assert d.action is ActionKind.DISPATCH_REWORK
+        assert "crewflow:running" in d.add_labels
+        assert "crewflow:review-fail" in d.remove_labels
+
+    def test_merge_pr_nao_deixa_duas_labels_de_review(self) -> None:
+        """Pós-review não pode carregar 2 labels de review ao mesmo tempo."""
+        r = _result(
+            state=State.REVIEW,
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
+        )
+        d = decide(r, state_comment=self._approved_comment(), auto_merge_on_approve=True)
+        # MERGE_PR remove todas as labels de review; add só crewflow:done
+        review_labels = {"crewflow:review", "crewflow:review-ok", "crewflow:review-fail"}
+        assert not (set(d.add_labels) & review_labels)
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +451,8 @@ class TestGate2AutoMerge:
         """crewflow:reviewed presente mas sem ReviewerResult → SKIP (reviewer ainda rodando)."""
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         d = decide(r, state_comment=None)
         assert d.action is ActionKind.SKIP
@@ -342,14 +463,14 @@ class TestGate2AutoMerge:
         state_comment = self._make_review_result(approved=True, comments=[])
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         d = decide(r, state_comment=state_comment, auto_merge_on_approve=True)
         assert d.action is ActionKind.MERGE_PR
         assert "crewflow:done" in d.add_labels
+        assert "crewflow:review-ok" in d.remove_labels
         assert "crewflow:review" in d.remove_labels
-        assert "crewflow:reviewed" in d.remove_labels
 
     def test_review_com_reviewed_aprovado_com_comentarios_notifica_tl(self) -> None:
         """Reviewer aprovado mas com comentários → NOTIFY_HUMAN TL."""
@@ -359,8 +480,8 @@ class TestGate2AutoMerge:
         )
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         d = decide(r, state_comment=state_comment)
         assert d.action is ActionKind.NOTIFY_HUMAN
@@ -375,8 +496,8 @@ class TestGate2AutoMerge:
         )
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         d = decide(r, state_comment=state_comment)
         assert d.action is ActionKind.NOTIFY_HUMAN
@@ -393,18 +514,18 @@ class TestGate2AutoMerge:
         assert "crewflow:reviewed" in d.add_labels
 
     def test_merge_pr_labels_corretas(self) -> None:
-        """MERGE_PR deve adicionar done e remover review+reviewed."""
+        """MERGE_PR deve adicionar done e remover review-ok (e review/reviewed)."""
         state_comment = self._make_review_result(approved=True, comments=[])
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         d = decide(r, state_comment=state_comment, auto_merge_on_approve=True)
         assert d.action is ActionKind.MERGE_PR
         assert set(d.add_labels) == {"crewflow:done"}
+        assert "crewflow:review-ok" in d.remove_labels
         assert "crewflow:review" in d.remove_labels
-        assert "crewflow:reviewed" in d.remove_labels
 
     # ── SHA verification ──────────────────────────────────────────────
 
@@ -413,8 +534,8 @@ class TestGate2AutoMerge:
         state_comment = self._make_review_result(approved=True, comments=[])
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         # SHA do PR mudou após a review (reviewer usou "abc123", PR agora em "deadbeef...")
         d = decide(r, state_comment=state_comment, pr_head_sha="deadbeef123")
@@ -437,8 +558,8 @@ class TestGate2AutoMerge:
 
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         # Mesmo prefixo de 8 chars — SHA completo do PR pode ser maior
         d = decide(r, state_comment=state_comment, pr_head_sha="abc12345xyz", auto_merge_on_approve=True)
@@ -459,8 +580,8 @@ class TestGate2AutoMerge:
 
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         d = decide(r, state_comment=state_comment, pr_head_sha="newsha123", auto_merge_on_approve=True)
         assert d.action is ActionKind.MERGE_PR  # sem SHA do reviewer → não bloqueia
@@ -470,8 +591,8 @@ class TestGate2AutoMerge:
         state_comment = self._make_review_result(approved=True, comments=[])
         r = _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
         d = decide(r, state_comment=state_comment, pr_head_sha=None, auto_merge_on_approve=True)
         assert d.action is ActionKind.MERGE_PR  # sem SHA do PR → não bloqueia
@@ -502,8 +623,8 @@ class TestAutoMergeOnApprove:
     def _result_review(self) -> ScanResult:
         return _result(
             state=State.REVIEW,
-            labels=["crewflow:review", "crewflow:reviewed", "crewflow:feature"],
-            modifiers={Modifier.REVIEWED},
+            labels=["crewflow:review-ok", "crewflow:feature"],
+            modifiers={Modifier.REVIEW_OK},
         )
 
     def _squad(self, auto_merge: bool) -> object:
@@ -599,5 +720,5 @@ class TestAutoMergeOnApprove:
         d = decide(r, state_comment=state_comment, auto_merge_on_approve=True)
         assert d.action is ActionKind.MERGE_PR
         assert "crewflow:done" in d.add_labels
+        assert "crewflow:review-ok" in d.remove_labels
         assert "crewflow:review" in d.remove_labels
-        assert "crewflow:reviewed" in d.remove_labels

@@ -28,10 +28,12 @@ flowchart TD
     C -->|vigia dispara sessão one-shot| D["🔵 crewflow:dev<br/>(implementa + valida local)"]
     D --> E["🔀 PR aberto<br/>release/* → main"]
     E --> R["🟣 crewflow:review"]
-    R --> BOT["🤖 code review automatizado<br/>(marca crewflow:reviewed)"]
+    R --> BOT["🤖 code review automatizado<br/>(lock interno crewflow:reviewed por SHA)"]
     BOT --> G1{"GATE 2<br/>TL aprova o review?"}
-    G1 -.->|reprova| D
-    G1 -->|aprova| HML["🚀 Dev faz deploy HML<br/>MANUALMENTE"]
+    G1 -->|reprova| FAIL["🔴 crewflow:review-fail<br/>(aguarda rework)"]
+    FAIL -.->|rework na mesma PR| D
+    G1 -->|aprova| OK["🟢 crewflow:review-ok<br/>(pronto para merge)"]
+    OK --> HML["🚀 Dev faz deploy HML<br/>MANUALMENTE"]
     HML --> Q["🔷 crewflow:qa<br/>(QA testa em HML)"]
     Q --> G2{"GATE 3<br/>QA aprova?"}
     G2 -.->|reprova| D
@@ -45,7 +47,7 @@ flowchart TD
     classDef auto fill:#bbf7d0,stroke:#15803d,color:#000
     classDef gate fill:#e9d5ff,stroke:#7e22ce,color:#000
     class A,B,HML,Q,M human
-    class C,D,E,R,BOT,I auto
+    class C,D,E,R,BOT,OK,FAIL,I auto
     class G0,G1,G2 gate
 ```
 
@@ -72,10 +74,17 @@ sobrepostos. **Modificador de parada tem prioridade sobre o estado.**
 |---|---|---|
 | `crewflow:blocked` | 🔴 `#DC2626` | bloqueado — **para tudo** (prioridade sobre o estado) |
 | `crewflow:running` | 🟠 `#F97316` | trabalho em andamento no estado atual |
-| `crewflow:reviewed` | ⚫ `#6B7280` | lock anti-loop: já analisado neste SHA |
+| `crewflow:review-ok` | 🟢 `#22C55E` | reviewer aprovou — pronto para merge (remove `crewflow:review`) |
+| `crewflow:review-fail` | 🔴 `#DC2626` | reviewer reprovou — aguarda rework, **re-trabalho na mesma PR** (remove `crewflow:review`; teto: N rounds → NOTIFY_HUMAN tl) |
+| `crewflow:reviewed` | ⚫ `#6B7280` | lock anti-loop **interno**: já analisado neste SHA (não é estado de resultado) |
 | `crewflow:hml-bypass` | 🟧 `#C2410C` | **exceção auditada:** hotfix foi direto pra PRD sem HML — exige justificativa no comentário (o motor **bloqueia o merge** sem ela) |
-| `crewflow:changes-requested` | 🟣 `#9333EA` | reviewer pediu mudança — **re-trabalho na mesma PR** (teto: N rounds → NOTIFY_HUMAN tl) |
+| `crewflow:changes-requested` | 🟣 `#9333EA` | *(deprecada)* substituída por `crewflow:review-fail` — mantida apenas para retrocompatibilidade |
 | `crewflow:conflito` | 🟠 `#F97316` | PR com conflito de merge ou base desatualizada — **cron de conflito resolve via rebase na mesma branch** |
+
+> **Resultado do review, 1 label por vez.** Após o review a issue nunca carrega
+> duas labels de review ao mesmo tempo: aprovado → `crewflow:review-ok`; reprovado
+> → `crewflow:review-fail`; ao terminar o rework, volta para `crewflow:review`
+> (singular). `crewflow:reviewed` permanece apenas como lock anti-loop interno.
 
 ### Tipo de fluxo (routing) e prioridade
 
@@ -121,8 +130,8 @@ Em vez de um único cron monolítico (`run`), a esteira pode ser dividida em
 |---|---|---|---|
 | `run_dev` | `crewflow:todo` | `DISPATCH_DEV` — implementa + abre PR | 600s (10 min) |
 | `run_reviewer` | `crewflow:review` (sem `crewflow:reviewed`) | `DISPATCH_REVIEWER` — code review | 300s (5 min) |
-| `run_merge` | `crewflow:review` + `crewflow:reviewed` aprovado | `MERGE_PR` — merge squash | 120s (2 min) |
-| `run_conflito` | `crewflow:changes-requested` ou `crewflow:conflito` | `DISPATCH_REWORK` (re-trabalho pós-review) / `DISPATCH_CONFLICT_RESOLVER` (conflito de merge) | 300s (5 min) |
+| `run_merge` | `crewflow:review-ok` | `MERGE_PR` — merge squash | 120s (2 min) |
+| `run_conflito` | `crewflow:review-fail` ou `crewflow:conflito` | `DISPATCH_REWORK` (re-trabalho pós-review) / `DISPATCH_CONFLICT_RESOLVER` (conflito de merge) | 300s (5 min) |
 
 O modelo por estágio é configurável via `stage_models` na `deployment.config.yaml`:
 
@@ -138,6 +147,10 @@ O entrypoint legado `run` ainda funciona e orquestra todos os 4 estágios em
 sequência — útil para migração gradual ou modo de aviso (auto_dispatch=false).
 
 ## Lock anti-loop: `crewflow:reviewed`
+
+`crewflow:reviewed` é hoje um lock **puramente interno** — não é um estado de
+resultado de negócio. O resultado visível do review é expresso por
+`crewflow:review-ok` (aprovado) ou `crewflow:review-fail` (reprovado).
 
 Uma análise por SHA. O robô de review adiciona `crewflow:reviewed` depois de
 comentar. Se a label já está lá, o executor ignora a issue. Quando o dev faz um

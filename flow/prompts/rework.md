@@ -61,14 +61,14 @@ Execute UMA vez, do início ao fim, e PARE:
    Se qualquer check falhar e você não conseguir corrigir, marque `crewflow:blocked` e ENCERRE. **Não faça push com CI vermelho.**
 8. Faça commit e push na branch existente:
    `git add -A && git commit -m "fix: aplicar pedidos de mudança do reviewer (iteração {{iteration}})" && git push origin feat/issue-{{issue_number}}`
-   Isso remove automaticamente `crewflow:reviewed` (novo SHA invalida o lock anti-loop).
+   Isso invalida o lock anti-loop interno `crewflow:reviewed` (novo SHA).
 9. Atualize o state_comment da issue incrementando `review_iterations`:
    - Leia o comentário atual: `gh issue view {{issue_number}} --repo {{repo}} --comments`
    - Incremente o campo `**Iterações de review:**` (ou adicione-o se ausente)
    - Adicione uma linha no histórico: `| <data> | rework → review | kiro-dev |`
    - Atualize via `gh issue comment {{issue_number}} --repo {{repo}} --body "..."` (editando o comentário existente)
-10. Troque a label de volta para review:
-   `gh issue edit {{issue_number}} --repo {{repo}} --remove-label "crewflow:running,crewflow:changes-requested" --add-label "crewflow:review"`
+10. Troque a label de volta para review (singular, sem combinação):
+   `gh issue edit {{issue_number}} --repo {{repo}} --remove-label "crewflow:running,crewflow:review-fail" --add-label "crewflow:review"`
 11. Ao terminar: {{notify_step}}
 
    remova `crewflow:running`, mantenha `crewflow:review`, e ENCERRE.

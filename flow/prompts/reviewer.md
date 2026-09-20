@@ -73,8 +73,10 @@ Execute UMA vez, do início ao fim, e PARE:
    no passo 2 — não {{head_sha}} hardcoded, pois a PR pode ter avançado entre o
    dispatch e a execução.
    IMPORTANTE: o ReviewerResult PERMANECE na issue — é o que o scan lê pra decidir MERGE_PR.
-11. Se aprovado (zero comentários + CI verde): adicione a label `crewflow:reviewed` à issue #{{issue_number}}.
-12. Se tem comentários ou CI vermelho: NÃO adicione `crewflow:reviewed` — o TL decide.
+11. Se aprovado (zero comentários + CI verde): aplique o resultado à issue #{{issue_number}}:
+   `gh issue edit {{issue_number}} --repo {{repo}} --add-label "crewflow:review-ok" --remove-label "crewflow:review"`
+12. Se tem comentários ou CI vermelho: aplique o resultado de reprovação (aguarda rework):
+   `gh issue edit {{issue_number}} --repo {{repo}} --add-label "crewflow:review-fail" --remove-label "crewflow:review"`
 13. ENCERRE.
 
 ### Regras críticas

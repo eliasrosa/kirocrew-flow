@@ -256,16 +256,16 @@ Os prompts das sessões one-shot (dev e reviewer) vivem em arquivos MD editávei
 |---|---|---|
 | `dev.md` | implementação inicial | `DISPATCH_DEV` — issue em `crewflow:todo` |
 | `reviewer.md` | code review | `DISPATCH_REVIEWER` — issue em `crewflow:review` |
-| `rework.md` | re-trabalho pós-review | `DISPATCH_REWORK` — issue com `crewflow:changes-requested` |
+| `rework.md` | re-trabalho pós-review | `DISPATCH_REWORK` — issue com `crewflow:review-fail` |
 | `conflict.md` | resolução de conflito | `DISPATCH_CONFLICT_RESOLVER` — issue com `crewflow:conflito` |
 
-### Ciclo de re-trabalho (crewflow:changes-requested)
+### Ciclo de re-trabalho (crewflow:review-fail)
 
-Quando o reviewer pede mudança, o motor adiciona `crewflow:changes-requested` à issue
+Quando o reviewer pede mudança, o motor adiciona `crewflow:review-fail` à issue
 e despacha uma sessão `rework` que:
 1. Lê os pedidos de mudança nos comentários do PR
 2. Aplica as correções na **mesma branch/PR** (nunca cria PR novo)
-3. Commita e faz push (o novo SHA invalida `crewflow:reviewed` automaticamente)
+3. Commita e faz push (o novo SHA invalida o lock interno `crewflow:reviewed` automaticamente)
 4. Volta a issue para `crewflow:review`
 
 Teto de iterações: `gates.exceeded_review_iterations()` controla o cap (default 3).

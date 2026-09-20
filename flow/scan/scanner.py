@@ -30,6 +30,18 @@ from flow.scan.cache import compute_hash, get_hash, set_hash
 # (ex: redisparar o reviewer em REVIEW, avisar QA em QA).
 ALWAYS_INCLUDE_STATES: frozenset[State] = frozenset({State.REVIEW, State.QA})
 
+# Modificadores de RESULTADO de review que, no modelo de label único, SUBSTITUEM
+# o estado crewflow:review na issue (o reviewer aplica crewflow:review-ok /
+# crewflow:review-fail e remove crewflow:review). Uma issue com apenas um desses
+# modificadores NÃO tem label de estado (parse_state → None), mas ainda precisa
+# ser descoberta e reprocessada em todo ciclo: run_merge age sobre REVIEW_OK e
+# run_conflito/rework age sobre REVIEW_FAIL. Sem isso, a issue sai da esteira
+# após o review (o executor nunca a recebe).
+ALWAYS_INCLUDE_MODIFIERS: frozenset[Modifier] = frozenset({
+    Modifier.REVIEW_OK,
+    Modifier.REVIEW_FAIL,
+})
+
 logger = logging.getLogger(__name__)
 
 
@@ -161,21 +173,31 @@ def _scan_project(
 
 
 def _fetch_all_labeled_items(project: str, provider: IssueProvider) -> list[dict]:
-    """Lista todas as issues com labels crewflow:* (todos os estados)."""
+    """Lista todas as issues com labels crewflow:* (todos os estados).
+
+    Além de iterar os ``State``, consulta também os modificadores de resultado
+    de review (``crewflow:review-ok`` / ``crewflow:review-fail``): no modelo de
+    label único esses labels SUBSTITUEM ``crewflow:review``, então uma issue
+    aprovada/reprovada não tem label de estado e não seria retornada por nenhuma
+    das consultas por ``State``.  ``list_by_state`` é apenas uma listagem
+    filtrada por um label — passar um valor de modificador é válido.
+    """
     all_items: list[dict] = []
     seen: set[str] = set()
 
-    # Busca por cada estado — a API filtra por uma label por vez
-    for s in State:
+    # Busca por cada estado E por cada modificador de resultado de review — a API
+    # filtra por uma label por vez.
+    query_labels = [s.value for s in State] + [m.value for m in ALWAYS_INCLUDE_MODIFIERS]
+    for label in query_labels:
         try:
-            items = provider.list_by_state(project, s.value)
+            items = provider.list_by_state(project, label)
             for item in items:
                 key = item.get("key", "")
                 if key and key not in seen:
                     seen.add(key)
                     all_items.append(item)
         except ProviderError as exc:
-            logger.warning("scan: erro ao listar %s em %s: %s", s.value, project, exc)
+            logger.warning("scan: erro ao listar %s em %s: %s", label, project, exc)
 
     return all_items
 
@@ -210,8 +232,15 @@ def _evaluate_item(
 
     modifiers = parse_modifiers(label_set)
 
-    # Issue sem estado crewflow: está fora da esteira
-    if current_state is None:
+    # Modificadores de resultado de review (review-ok/review-fail) SUBSTITUEM o
+    # label de estado no modelo de label único. Uma issue com esses labels não
+    # tem estado (current_state is None) mas continua na esteira: o executor age
+    # sobre o modificador (run_merge lê REVIEW_OK, rework lê REVIEW_FAIL).
+    has_review_result = bool(modifiers & ALWAYS_INCLUDE_MODIFIERS)
+
+    # Issue sem estado crewflow: E sem resultado de review pendente está fora da
+    # esteira. Só descartamos quando não há NADA acionável.
+    if current_state is None and not has_review_result:
         return None
 
     # Monta o WorkItem mínimo para as validações de domínio
@@ -240,7 +269,11 @@ def _evaluate_item(
     # - ou está em um estado 'ativo' que o executor monitora em todo ciclo
     #   (REVIEW, QA) — mesmo sem mudança de labels, o motor pode precisar agir
     #   (ex: redisparar o reviewer ou avisar QA)
-    if not changed and not dispatch_candidate and current_state not in ALWAYS_INCLUDE_STATES:
+    # - ou carrega um resultado de review (review-ok/review-fail) — precisa ser
+    #   reprocessado em todo ciclo para que run_merge/run_conflito o peguem de
+    #   forma confiável mesmo sem mudança de labels desde o último ciclo.
+    always_include = current_state in ALWAYS_INCLUDE_STATES or has_review_result
+    if not changed and not dispatch_candidate and not always_include:
         return None  # nada mudou e não é candidato — skip
 
     reason = _build_reason(changed, dispatch_candidate, current_state, modifiers, spec_valid)
@@ -269,6 +302,10 @@ def _build_reason(
         parts.append("CANDIDATO A DISPATCH")
     elif current_state == State.SPEC and spec_valid is False:
         parts.append("SPEC SEM REPO — flagrada para correção humana")
+    elif Modifier.REVIEW_OK in modifiers:
+        parts.append("resultado de review: crewflow:review-ok (aguardando merge)")
+    elif Modifier.REVIEW_FAIL in modifiers:
+        parts.append("resultado de review: crewflow:review-fail (aguardando rework)")
     elif Modifier.BLOCKED in modifiers:
         parts.append(f"bloqueada em {current_state} (crewflow:blocked)")
     elif Modifier.RUNNING in modifiers:

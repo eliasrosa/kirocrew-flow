@@ -32,10 +32,14 @@ crewflow:spec → crewflow:ready → crewflow:todo → crewflow:dev → crewflow
 |---|---|
 | `crewflow:blocked` | Para tudo (prioridade sobre o estado) |
 | `crewflow:running` | Trabalho em andamento |
-| `crewflow:reviewed` | Lock anti-loop: já analisado neste SHA |
+| `crewflow:review-ok` | Reviewer aprovou — pronto para merge (remove `crewflow:review`) |
+| `crewflow:review-fail` | Reviewer reprovou — aguarda rework (remove `crewflow:review`) |
+| `crewflow:reviewed` | Lock anti-loop **interno**: já analisado neste SHA (não é estado de resultado) |
 | `crewflow:hml-bypass` | Exceção auditada: hotfix pulou o HML (exige justificativa) |
-| `crewflow:changes-requested` | Reviewer pediu mudança — dev corrige na mesma PR e re-submete |
+| `crewflow:changes-requested` | *(deprecada)* substituída por `crewflow:review-fail` |
 | `crewflow:conflito` | PR com conflito de merge ou base desatualizada — cron resolve e atualiza a mesma branch |
+
+> **Resultado do review, 1 label por vez.** Após o review a issue nunca carrega duas labels de review ao mesmo tempo: aprovado → `crewflow:review-ok`; reprovado → `crewflow:review-fail`; ao terminar o rework, volta para `crewflow:review` (singular). `crewflow:reviewed` permanece apenas como lock anti-loop interno.
 
 ### Tipo de fluxo (routing) e prioridade
 
@@ -126,9 +130,9 @@ Depois registre os crons no dashboard do Kiro Crew. Há duas opções:
 cron_add(name="crewflow-dev",      script="~/.kiro/crew/crons/deployment.py:run_dev",      every=600)
 # Reviewer: code review (PRs crewflow:review)
 cron_add(name="crewflow-reviewer", script="~/.kiro/crew/crons/deployment.py:run_reviewer", every=300)
-# Merge: merge squash (crewflow:review + crewflow:reviewed aprovado)
+# Merge: merge squash (crewflow:review-ok)
 cron_add(name="crewflow-merge",    script="~/.kiro/crew/crons/deployment.py:run_merge",    every=120)
-# Conflito: re-trabalho pós-review (crewflow:changes-requested)
+# Conflito: re-trabalho pós-review (crewflow:review-fail)
 cron_add(name="crewflow-conflito", script="~/.kiro/crew/crons/deployment.py:run_conflito", every=300)
 ```
 
@@ -207,7 +211,7 @@ O agente reviewer valida o PR como **gate único** antes do approve:
 3. **Analisa o código** — corretude, testes, estilo e convenções do steering do repo.
 4. **Decide com as três condições**: CI verde + zero comentários não resolvidos no PR + sem blockers técnicos.
 5. **Posta o resultado completo nos DOIS lugares** — PR e issue — com: o que foi feito, o resultado, o link e todas as informações.
-6. **Aplica `crewflow:reviewed`** somente quando as três condições são satisfeitas. Com `auto_merge_on_approve: true` no squad config, o motor faz merge squash automático; sem a flag (default), para em `crewflow:reviewed` aguardando merge manual.
+6. **Aplica `crewflow:review-ok`** (removendo `crewflow:review`) quando as três condições são satisfeitas, ou **`crewflow:review-fail`** quando há pedidos de mudança / CI vermelho. Com `auto_merge_on_approve: true` no squad config, o motor faz merge squash automático a partir de `crewflow:review-ok`; sem a flag (default), para em `crewflow:review-ok` aguardando merge manual.
 
 ## Desenvolvimento
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# KiroCrew Flow — aplica as 19 labels do padrão `crewflow:*` num repo (idempotente via --force).
+# KiroCrew Flow — aplica as 22 labels do padrão `crewflow:*` num repo (idempotente via --force).
 # Uso: ./scripts/setup-labels.sh owner/repo [owner/repo ...]
 #
 # O prefixo `crewflow:` funciona em GitHub e Jira. Confluence NÃO aceita `:`
@@ -29,15 +29,20 @@ LABELS=(
   # ── MODIFICADORES (0..N, sobrepoem) ──────────────────────────────────
   "crewflow:blocked|DC2626|Bloqueado - para tudo (tem prioridade sobre o estado)"
   "crewflow:running|F97316|Trabalho em andamento no estado atual"
-  "crewflow:reviewed|6B7280|Lock anti-loop: ja analisado neste SHA"
+  "crewflow:reviewed|6B7280|Lock anti-loop INTERNO: ja analisado neste SHA (nao e estado de resultado)"
+  # Resultado explicito do reviewer (1 label por vez, sem combinacao com review):
+  #   review-ok   = aprovado, pronto para merge (run_merge pega por esta label)
+  #   review-fail = reprovado, aguarda rework   (run_conflito pega por esta label)
+  "crewflow:review-ok|22C55E|Reviewer aprovou: pronto para merge"
+  "crewflow:review-fail|DC2626|Reviewer reprovou: aguarda rework"
   # Excecao auditada do fluxo de hotfix: pulou HML e foi direto pra PRD.
   # Exige justificativa no comentario da issue — o motor bloqueia o merge sem
   # ela. Existe pra tornar a excecao CONTAVEL: sem label, "quantos hotfixes
   # pularam HML neste trimestre?" nao tem resposta.
   "crewflow:hml-bypass|C2410C|Excecao auditada: hotfix foi direto pra PRD sem passar por HML (exige justificativa)"
-  # Pedido de mudanca do reviewer: a issue volta pro dev para re-trabalho na MESMA PR.
-  # Removida automaticamente quando o dev abre o novo commit (crewflow:reviewed some).
-  "crewflow:changes-requested|9333EA|Reviewer pediu mudanca: dev deve corrigir e re-submeter na mesma PR"
+  # (DEPRECADA) Substituida por crewflow:review-fail. Mantida so para compat com
+  # issues antigas; o novo modelo usa crewflow:review-fail para o resultado de reprovacao.
+  "crewflow:changes-requested|9333EA|(deprecada) Use crewflow:review-fail: reviewer pediu mudanca"
   # PR tem conflito de merge ou base desatualizada. O cron de conflito resolve o
   # rebase/merge na branch feat/issue-N existente e atualiza a MESMA PR.
   # Nunca abre PR nova.

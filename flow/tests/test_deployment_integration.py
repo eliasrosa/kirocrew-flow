@@ -247,7 +247,7 @@ class TestAutoMergeIntegration:
         return ctx
 
     def _make_review_scan_result(self) -> object:
-        """ScanResult em crewflow:review com crewflow:reviewed."""
+        """ScanResult com crewflow:review-ok (reviewer aprovou)."""
         from flow.audit.state_comment import StateComment, render
         from flow.domain.gates import WorkItem
         from flow.domain.state import Modifier, State
@@ -264,10 +264,10 @@ class TestAutoMergeIntegration:
             item=WorkItem(
                 key="https://github.com/owner/repo/issues/42",
                 title="[owner/repo] Feature X",
-                labels=frozenset(["crewflow:review", "crewflow:reviewed", "crewflow:feature"]),
+                labels=frozenset(["crewflow:review-ok", "crewflow:feature"]),
             ),
             current_state=State.REVIEW,
-            modifiers=frozenset([Modifier.REVIEWED]),
+            modifiers=frozenset([Modifier.REVIEW_OK]),
             dispatch_candidate=False,
             spec_valid=None,
             changed=True,
@@ -294,10 +294,10 @@ class TestAutoMergeIntegration:
             item=WorkItem(
                 key="https://github.com/owner/repo/issues/42",
                 title="[owner/repo] Feature X",
-                labels=frozenset(["crewflow:review", "crewflow:reviewed", "crewflow:feature"]),
+                labels=frozenset(["crewflow:review-ok", "crewflow:feature"]),
             ),
             current_state=State.REVIEW,
-            modifiers=frozenset([Modifier.REVIEWED]),
+            modifiers=frozenset([Modifier.REVIEW_OK]),
             dispatch_candidate=False,
             spec_valid=None,
             changed=True,
@@ -322,7 +322,7 @@ class TestAutoMergeIntegration:
             mock.patch("flow.adapters.github_client.merge_pull_request",
                        return_value={"merged": True}),
             mock.patch("flow.adapters.github_client.get_work_item",
-                       return_value={"labels": ["crewflow:review", "crewflow:reviewed", "crewflow:feature"]}),
+                       return_value={"labels": ["crewflow:review-ok", "crewflow:feature"]}),
             mock.patch("flow.adapters.github_client.set_labels"),
             mock.patch("flow.adapters.github_client.upsert_pr_review_comment"),
             mock.patch("flow.adapters.github_client.get_state_comment", return_value=state_body),
@@ -942,12 +942,15 @@ class TestReviewerPrompt:
 
         assert "gh pr diff 99 --repo owner/myrepo" in prompt
 
-    def test_contem_instrucao_de_crewflow_reviewed(self) -> None:
+    def test_contem_instrucao_de_labels_de_resultado(self) -> None:
         from deployment.deployment import _reviewer_prompt
 
         prompt = _reviewer_prompt("owner/myrepo", pr_number=99, issue_number=42)
 
-        assert "crewflow:reviewed" in prompt
+        # Novo modelo: labels semânticas de resultado (1 por vez, sem combinação)
+        assert "crewflow:review-ok" in prompt
+        assert "crewflow:review-fail" in prompt
+        assert '--remove-label "crewflow:review"' in prompt
 
     def test_contem_regra_nunca_merge(self) -> None:
         from deployment.deployment import _reviewer_prompt
@@ -1030,7 +1033,8 @@ class TestReviewerPrompt:
         assert "# review: myrepo PR #99 (issue #42)" in prompt
         assert "gh issue view 42 --repo owner/myrepo" in prompt
         assert "gh pr diff 99 --repo owner/myrepo" in prompt
-        assert "crewflow:reviewed" in prompt
+        assert "crewflow:review-ok" in prompt
+        assert "crewflow:review-fail" in prompt
         assert "NUNCA mergeie" in prompt
 
     def test_exemplar_do_pr_derivado_do_helper(self) -> None:
