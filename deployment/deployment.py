@@ -2542,12 +2542,24 @@ _STAGE_REVIEWER = "reviewer"
 _STAGE_MERGE    = "merge"
 _STAGE_CONFLITO = "conflito"
 
-# ActionKinds por estágio — o filtro que cada entrypoint aplica sobre o scan
+# ActionKinds por estágio — o filtro que cada entrypoint aplica sobre o scan.
+#
+# Cobertura completa das ActionKinds de dispatch/mutação: cada ação emitida
+# pelo executor que exige efeito colateral (dispatch de sessão ou mutação de
+# label) DEVE aparecer em algum estágio, ou o modo por-estágio a descarta
+# silenciosamente (regressão #87). O guard test test_stage_actions_parity.py
+# quebra se uma nova ActionKind entrar sem mapeamento.
+#
+# mark_conflito → reviewer: MARK_CONFLITO só é emitido para PRs em review
+#   detectados como CONFLICTING (domínio do cron reviewer, que já inspeciona
+#   PRs em review e é o único que busca pr_mergeable).
+# dispatch_conflict_resolver → conflito: age em issues que já carregam
+#   crewflow:conflito (domínio do cron de conflito, junto do dispatch_rework).
 _STAGE_ACTIONS = {
     _STAGE_DEV:      frozenset({"dispatch_dev"}),
-    _STAGE_REVIEWER: frozenset({"dispatch_reviewer"}),
+    _STAGE_REVIEWER: frozenset({"dispatch_reviewer", "mark_conflito"}),
     _STAGE_MERGE:    frozenset({"merge_pr"}),
-    _STAGE_CONFLITO: frozenset({"dispatch_rework"}),
+    _STAGE_CONFLITO: frozenset({"dispatch_rework", "dispatch_conflict_resolver"}),
 }
 
 
@@ -2684,6 +2696,8 @@ def _run_stage(ctx: object, stage: str) -> None:
     dispatch_devs: list = []
     dispatch_reviewers: list = []
     dispatch_reworks: list = []
+    mark_conflitos: list = []          # ScanResult — issues para marcar crewflow:conflito
+    conflict_resolvers: list = []      # (repo, issue) — cron de conflito resolve rebase
     needs_human: list = []
     blocked_bypass: list = []
     rebranded: list = []
@@ -2712,8 +2726,14 @@ def _run_stage(ctx: object, stage: str) -> None:
                     result.item.key,
                 )
 
+        # Busca o SHA do HEAD do PR (detecção de push pós-review) e a
+        # mergeability (detecção de conflito de merge → crewflow:conflito).
+        # Espelha o run() monolítico: para QUALQUER issue em review lê o PR,
+        # pois pr_mergeable é pré-condição do MARK_CONFLITO — sem essa busca o
+        # executor nunca emite MARK_CONFLITO no modo por-estágio (regressão #87).
         pr_head_sha: str | None = None
-        if result.current_state is State.REVIEW and Modifier.REVIEWED in result.modifiers:
+        pr_mergeable: str | None = None
+        if result.current_state is State.REVIEW:
             import contextlib
             with contextlib.suppress(Exception):
                 _repo = (
@@ -2725,8 +2745,15 @@ def _run_stage(ctx: object, stage: str) -> None:
                     _pr = provider.get_pr_for_issue(_repo, _issue_number)
                     if _pr:
                         pr_head_sha = _pr.get("headRefOid") or _pr.get("headRefName")
+                        pr_mergeable = _pr.get("mergeable")  # "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
 
-        decision = decide(result, state_comment=state_comment, squad=squad, pr_head_sha=pr_head_sha)
+        decision = decide(
+            result,
+            state_comment=state_comment,
+            squad=squad,
+            pr_head_sha=pr_head_sha,
+            pr_mergeable=pr_mergeable,
+        )
 
         template = resolve_template(result, squad)
         logger.info(
@@ -2757,6 +2784,16 @@ def _run_stage(ctx: object, stage: str) -> None:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             issue = _scan_result_to_issue(result)
             dispatch_reviewers.append((repo, issue))
+
+        elif decision.action is ActionKind.MARK_CONFLITO:
+            mark_conflitos.append(result)
+
+        elif decision.action is ActionKind.DISPATCH_CONFLICT_RESOLVER:
+            repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
+            if not repo:
+                repo = repos[0] if repos else ""
+            issue = _scan_result_to_issue(result)
+            conflict_resolvers.append((repo, issue))
 
         elif decision.action is ActionKind.MERGE_PR:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
@@ -2796,9 +2833,12 @@ def _run_stage(ctx: object, stage: str) -> None:
         block=len(blocked_bypass),
         rebrand=len(rebranded),
         spec_invalid=len(spec_invalid),
+        conflict_resolver=len(conflict_resolvers),
+        mark_conflito=len(mark_conflitos),
     )
 
     if not any([spec_invalid, dispatch_devs, dispatch_reviewers, dispatch_reworks,
+                mark_conflitos, conflict_resolvers,
                 needs_human, blocked_bypass, rebranded, merge_prs, dead_session_candidates_stage]):
         return
 
@@ -2813,6 +2853,8 @@ def _run_stage(ctx: object, stage: str) -> None:
             rebranded=rebranded,
             merge_prs=merge_prs,
             spec_invalid=spec_invalid,
+            conflict_resolvers=conflict_resolvers,
+            mark_conflitos=mark_conflitos,
         )
         return
 
@@ -2926,6 +2968,27 @@ def _run_stage(ctx: object, stage: str) -> None:
                     repo, issue_number, exc,
                 )
 
+        # ── Aplica crewflow:conflito nas PRs com conflito de merge detectado ──
+        # MARK_CONFLITO é emitido durante o review (PR CONFLICTING); o cron de
+        # conflito depois localiza a branch e resolve o rebase.
+        if mark_conflitos:
+            for result in mark_conflitos:
+                try:
+                    _repo_mc = result.item.key.split("/issues/")[0].replace("https://github.com/", "") or (repos[0] if repos else "")
+                    current_labels = list(result.item.labels)
+                    for lbl in ("crewflow:conflito",):
+                        if lbl not in current_labels:
+                            current_labels.append(lbl)
+                    provider.set_labels(_repo_mc, result.item.key, current_labels)
+                    logger.info("deployment[reviewer]: crewflow:conflito aplicado em %s", result.item.key)
+                except Exception as exc:
+                    logger.error("deployment[reviewer]: erro ao aplicar conflito em %s: %s", result.item.key, exc)
+            linhas_mc = "\n".join(f"  - {r.item.key}: {r.item.title}" for r in mark_conflitos)
+            ctx.notify(  # type: ignore[attr-defined]
+                f"KiroCrew Flow [reviewer]: {len(mark_conflitos)} PR(s) com conflito de merge detectado — "
+                f"crewflow:conflito aplicado.{vm}\n{linhas_mc}"
+            )
+
     elif stage == _STAGE_MERGE:
         if merge_prs:
             _execute_auto_merges(ctx, merge_prs, chat_id, provider)
@@ -2982,6 +3045,61 @@ def _run_stage(ctx: object, stage: str) -> None:
             except Exception as exc:
                 logger.error(
                     "deployment[conflito]: erro ao despachar rework para %s#%s: %s",
+                    repo, issue_number, exc,
+                )
+
+        # ── Resolve conflito de merge: rebase na branch existente ────────────
+        # DISPATCH_CONFLICT_RESOLVER age em issues já marcadas crewflow:conflito;
+        # localiza a branch feat/issue-N e despacha a sessão de resolução (conflict.md).
+        for repo, issue in conflict_resolvers:
+            issue_number = issue["number"]
+            if not auto:
+                ctx.notify(  # type: ignore[attr-defined]
+                    f"KiroCrew Flow [conflito] (Fase 1): conflito pendente — "
+                    f"{repo}#{issue_number}: {issue['title']}.{vm}\n"
+                    f"  Ative auto_dispatch para despachar o resolvedor de conflito automaticamente."
+                )
+                continue
+            if _conflict_resolver_has_active(repo, issue_number):
+                logger.info(
+                    "deployment[conflito]: resolvedor de conflito já ativo para %s#%s — dispatch ignorado",
+                    repo, issue_number,
+                )
+                continue
+
+            branch_cr = f"feat/issue-{issue_number}"
+            pr_number_cr: int | None = None
+            try:
+                import subprocess as _sp_cr
+                _pr_cr_res = _sp_cr.run(
+                    ["gh", "pr", "list", "--repo", repo, "--head", branch_cr,
+                     "--state", "open", "--json", "number"],
+                    capture_output=True, text=True, timeout=15, check=False,
+                )
+                if _pr_cr_res.returncode == 0:
+                    _prs_cr = json.loads(_pr_cr_res.stdout or "[]")
+                    if _prs_cr:
+                        pr_number_cr = int(_prs_cr[0]["number"])
+            except Exception as exc_cr:
+                logger.warning(
+                    "deployment[conflito]: erro ao localizar PR para conflict resolver %s#%s: %s",
+                    repo, issue_number, exc_cr,
+                )
+
+            if pr_number_cr is None:
+                ctx.notify(  # type: ignore[attr-defined]
+                    f"KiroCrew Flow [conflito]: crewflow:conflito mas PR não localizado — "
+                    f"{repo}#{issue_number}.{vm}"
+                )
+                continue
+
+            try:
+                prompt_extra_cr = squad.dispatch_prompt_extra if squad else ""
+                _dispatch_conflict_resolver(ctx, repo, issue, pr_number_cr, cfg,
+                                            prompt_extra=prompt_extra_cr)
+            except Exception as exc:
+                logger.error(
+                    "deployment[conflito]: erro ao despachar conflict resolver para %s#%s: %s",
                     repo, issue_number, exc,
                 )
 

@@ -784,3 +784,198 @@ class TestDryRunPorEstagio:
             run_reviewer(ctx)
 
         mock_rev.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Conflito de merge no modo por-estágio (bug: mark_conflito / conflict_resolver
+# órfãos de _STAGE_ACTIONS — regressão #87). Prova que as duas ações agora
+# executam em stage mode.
+# ---------------------------------------------------------------------------
+
+class TestConflitoDeMergePorEstagio:
+    """MARK_CONFLITO no reviewer; DISPATCH_CONFLICT_RESOLVER no conflito."""
+
+    def _make_review_result(self, modifiers: list[str] | None = None) -> object:
+        """ScanResult em crewflow:review (com modificadores opcionais)."""
+        from flow.domain.gates import WorkItem
+        from flow.domain.state import parse_modifiers, parse_state
+        from flow.scan.scanner import ScanResult
+
+        labels_set = frozenset(["crewflow:review"] + (modifiers or []))
+        return ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/repo/issues/42",
+                title="[owner/repo] Feature em review",
+                labels=labels_set,
+            ),
+            current_state=parse_state(labels_set),
+            modifiers=parse_modifiers(labels_set),
+            dispatch_candidate=False,
+            spec_valid=None,
+            changed=True,
+            reason="test",
+        )
+
+    def test_reviewer_aplica_conflito_em_pr_conflicting(self) -> None:
+        """run_reviewer marca crewflow:conflito quando o PR está CONFLICTING.
+
+        O PR em review com mergeable=CONFLICTING faz o executor emitir
+        MARK_CONFLITO; o cron reviewer aplica a label via provider.set_labels.
+        """
+        ctx = _make_ctx()
+        result = self._make_review_result()
+
+        fake_pr = {
+            "number": 99,
+            "headRefName": "feat/issue-42",
+            "headRefOid": "abc123",
+            "mergeable": "CONFLICTING",
+        }
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config()),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_pf,
+            mock.patch("deployment.deployment._reviewer_has_active", return_value=False),
+            mock.patch("deployment.deployment._dispatch_reviewer") as mock_rev,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_pr_for_issue = mock.MagicMock(return_value=fake_pr)
+            mock_pf.return_value = mock_provider
+            run_reviewer(ctx)
+
+        # PR em conflito → não dispara reviewer, aplica crewflow:conflito
+        mock_rev.assert_not_called()
+        mock_provider.set_labels.assert_called_once()
+        _args = mock_provider.set_labels.call_args[0]
+        labels_arg = _args[2]  # (project, key, labels)
+        assert "crewflow:conflito" in labels_arg
+
+    def test_conflito_nao_aplica_label_quando_pr_mergeable(self) -> None:
+        """PR sem conflito segue para o reviewer normal, sem crewflow:conflito."""
+        ctx = _make_ctx()
+        result = self._make_review_result()
+
+        fake_pr = {
+            "number": 99,
+            "headRefName": "feat/issue-42",
+            "headRefOid": "abc123",
+            "mergeable": "MERGEABLE",
+        }
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config()),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_pf,
+            mock.patch("deployment.deployment._reviewer_has_active", return_value=False),
+            mock.patch("deployment.deployment._dispatch_reviewer") as mock_rev,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_pr_for_issue = mock.MagicMock(return_value=fake_pr)
+            mock_pf.return_value = mock_provider
+            run_reviewer(ctx)
+
+        mock_rev.assert_called_once()
+        mock_provider.set_labels.assert_not_called()
+
+    def test_conflito_despacha_resolvedor_para_issue_conflito(self) -> None:
+        """run_conflito despacha o resolvedor para issue crewflow:conflito.
+
+        Uma issue em review + crewflow:conflito faz o executor emitir
+        DISPATCH_CONFLICT_RESOLVER; o cron conflito localiza o PR e chama
+        _dispatch_conflict_resolver exatamente uma vez.
+        """
+        ctx = _make_ctx()
+        result = self._make_review_result(modifiers=["crewflow:conflito"])
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config()),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_pf,
+            mock.patch("deployment.deployment._conflict_resolver_has_active",
+                       return_value=False),
+            mock.patch("deployment.deployment._dispatch_conflict_resolver") as mock_cr,
+            mock.patch("subprocess.run") as mock_sub,
+        ):
+            mock_sub.return_value = mock.MagicMock(
+                returncode=0, stdout='[{"number": 77}]', stderr=""
+            )
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_pr_for_issue = mock.MagicMock(
+                return_value={"headRefOid": "abc123", "mergeable": "UNKNOWN"})
+            mock_pf.return_value = mock_provider
+            run_conflito(ctx)
+
+        mock_cr.assert_called_once()
+        # o número do PR localizado via gh pr list é passado ao resolvedor
+        _cr_args = mock_cr.call_args[0]
+        assert 77 in _cr_args  # (ctx, repo, issue, pr_number, cfg)
+
+    def test_conflito_notifica_sem_dispatch_quando_auto_false(self) -> None:
+        """run_conflito com auto_dispatch=false não despacha o resolvedor."""
+        ctx = _make_ctx()
+        result = self._make_review_result(modifiers=["crewflow:conflito"])
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config(auto_dispatch=False)),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_pf,
+            mock.patch("deployment.deployment._conflict_resolver_has_active",
+                       return_value=False),
+            mock.patch("deployment.deployment._dispatch_conflict_resolver") as mock_cr,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_pr_for_issue = mock.MagicMock(
+                return_value={"headRefOid": "abc123", "mergeable": "UNKNOWN"})
+            mock_pf.return_value = mock_provider
+            run_conflito(ctx)
+
+        mock_cr.assert_not_called()
+        ctx.notify.assert_called()
+
+    def test_reviewer_nao_despacha_conflict_resolver(self) -> None:
+        """Isolamento: run_reviewer não despacha o resolvedor de conflito."""
+        ctx = _make_ctx()
+        result = self._make_review_result(modifiers=["crewflow:conflito"])
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config()),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for") as mock_pf,
+            mock.patch("deployment.deployment._reviewer_has_active", return_value=False),
+            mock.patch("deployment.deployment._dispatch_conflict_resolver") as mock_cr,
+            mock.patch("deployment.deployment._dispatch_reviewer") as mock_rev,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_provider = mock.MagicMock()
+            mock_provider.get_pr_for_issue = mock.MagicMock(
+                return_value={"headRefOid": "abc123", "mergeable": "UNKNOWN"})
+            mock_pf.return_value = mock_provider
+            run_reviewer(ctx)
+
+        mock_cr.assert_not_called()
+        mock_rev.assert_not_called()
