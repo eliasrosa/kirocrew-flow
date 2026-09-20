@@ -26,6 +26,8 @@ interface Columns {
   review: Issue[]
   review_ok: Issue[]
   reviewed: Issue[]
+  qa: Issue[]
+  qa_fail: Issue[]
   done: Issue[]
   blocked: Issue[]
 }
@@ -59,6 +61,8 @@ function emptyColumns(): Columns {
     review: [],
     review_ok: [],
     reviewed: [],
+    qa: [],
+    qa_fail: [],
     done: [],
     blocked: [],
   }
@@ -92,6 +96,12 @@ const MOCK_RESPONSE: ApiResponse = {
       { number: 103, title: 'Exemplo: PR aprovado, aguardando merge', repo: 'eliasrosa/kirocrew-flow', url: '', age_min: 15, labels: ['crewflow:feature', 'crewflow:review-ok'], blocked: false, running: false },
     ],
     reviewed: [],
+    qa: [
+      { number: 105, title: 'Exemplo: issue em teste de QA', repo: 'eliasrosa/kirocrew-flow', url: '', age_min: 20, labels: ['crewflow:qa', 'crewflow:feature'], blocked: false, running: false },
+    ],
+    qa_fail: [
+      { number: 106, title: 'Exemplo: QA reprovado, aguardando volta ao dev', repo: 'eliasrosa/kirocrew-flow', url: '', age_min: 10, labels: ['crewflow:qa-fail', 'crewflow:bug'], blocked: false, running: false },
+    ],
     done: [],
     blocked: [
       { number: 102, title: 'Exemplo: issue bloqueada', repo: 'eliasrosa/kirocrew-flow', url: '', age_min: 240, labels: ['crewflow:debt'], blocked: true, running: false },
@@ -133,9 +143,13 @@ interface IssueCardProps {
   onDispatch?: (repo: string, number: number | string) => Promise<void>
   dispatching?: boolean
   column?: string
+  showQaActions?: boolean
+  onQaFail?: (repo: string, number: number | string) => Promise<void>
+  onQaApprove?: (repo: string, number: number | string) => Promise<void>
+  qaBusy?: boolean
 }
 
-function IssueCard({ issue, showDispatch, onDispatch, dispatching, column = '' }: IssueCardProps) {
+function IssueCard({ issue, showDispatch, onDispatch, dispatching, column = '', showQaActions, onQaFail, onQaApprove, qaBusy }: IssueCardProps) {
   const divergent = hasDivergence(issue, column)
   return (
     <Card style={{ marginBottom: 8, padding: '10px 12px' }}>
@@ -186,6 +200,32 @@ function IssueCard({ issue, showDispatch, onDispatch, dispatching, column = '' }
             {dispatching ? '...' : 'Dispatch'}
           </Btn>
         )}
+        {showQaActions && (onQaFail || onQaApprove) && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+            {onQaApprove && (
+              <Btn
+                size="sm"
+                variant="secondary"
+                disabled={qaBusy}
+                onClick={() => onQaApprove(issue.repo, issue.number)}
+                style={{ fontSize: 11 }}
+              >
+                {qaBusy ? '...' : 'Aprovar QA'}
+              </Btn>
+            )}
+            {onQaFail && (
+              <Btn
+                size="sm"
+                variant="secondary"
+                disabled={qaBusy}
+                onClick={() => onQaFail(issue.repo, issue.number)}
+                style={{ fontSize: 11 }}
+              >
+                {qaBusy ? '...' : 'Reprovar QA'}
+              </Btn>
+            )}
+          </div>
+        )}
       </div>
       {issue.url && (
         <a
@@ -213,9 +253,13 @@ interface SubColumnProps {
   onDispatch?: (repo: string, number: number | string) => Promise<void>
   dispatchingKey?: string
   columnKey?: string
+  showQaActions?: boolean
+  onQaFail?: (repo: string, number: number | string) => Promise<void>
+  onQaApprove?: (repo: string, number: number | string) => Promise<void>
+  qaBusyKey?: string
 }
 
-function SubColumn({ title, issues, color, showDispatch, onDispatch, dispatchingKey, columnKey = '' }: SubColumnProps) {
+function SubColumn({ title, issues, color, showDispatch, onDispatch, dispatchingKey, columnKey = '', showQaActions, onQaFail, onQaApprove, qaBusyKey }: SubColumnProps) {
   return (
     <div style={{ flex: 1, minWidth: 160 }}>
       <div style={{
@@ -256,6 +300,10 @@ function SubColumn({ title, issues, color, showDispatch, onDispatch, dispatching
               onDispatch={onDispatch}
               dispatching={dispatchingKey === key}
               column={columnKey}
+              showQaActions={showQaActions}
+              onQaFail={onQaFail}
+              onQaApprove={onQaApprove}
+              qaBusy={qaBusyKey === key}
             />
           )
         })
@@ -310,9 +358,12 @@ interface AgentsPanelProps {
   columns: Columns
   onDispatch: (repo: string, number: number | string) => Promise<void>
   dispatchingKey: string | null
+  onQaFail: (repo: string, number: number | string) => Promise<void>
+  onQaApprove: (repo: string, number: number | string) => Promise<void>
+  qaBusyKey: string | null
 }
 
-function AgentsPanel({ columns, onDispatch, dispatchingKey }: AgentsPanelProps) {
+function AgentsPanel({ columns, onDispatch, dispatchingKey, onQaFail, onQaApprove, qaBusyKey }: AgentsPanelProps) {
   return (
     <div style={{
       border: '1px solid rgba(128,128,128,0.15)',
@@ -407,6 +458,50 @@ function AgentsPanel({ columns, onDispatch, dispatchingKey }: AgentsPanelProps) 
             />
           </div>
         </div>
+
+        {/* Painel: QA */}
+        <div style={{ flex: 1, minWidth: 300 }}>
+          <div style={{
+            fontWeight: 700,
+            fontSize: 13,
+            marginBottom: 12,
+            paddingBottom: 6,
+            borderBottom: '2px solid #0ea5e9',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}>
+            <span>QA</span>
+            <span style={{
+              background: '#0ea5e9',
+              color: '#fff',
+              borderRadius: 10,
+              padding: '1px 7px',
+              fontSize: 11,
+              fontWeight: 700,
+            }}>
+              {columns.qa.length + columns.qa_fail.length}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 12 }}>
+            <SubColumn
+              title="Em teste"
+              issues={columns.qa}
+              color="#0ea5e9"
+              columnKey="qa"
+              showQaActions
+              onQaFail={onQaFail}
+              onQaApprove={onQaApprove}
+              qaBusyKey={qaBusyKey ?? undefined}
+            />
+            <SubColumn
+              title="Reprovado"
+              issues={columns.qa_fail}
+              color="#dc2626"
+              columnKey="qa_fail"
+            />
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -426,6 +521,7 @@ export default function CrewFlow() {
   const [isMock, setIsMock] = useState(false)
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
   const [dispatchingKey, setDispatchingKey] = useState<string | null>(null)
+  const [qaBusyKey, setQaBusyKey] = useState<string | null>(null)
 
   const load = useCallback(() => {
     return api
@@ -479,6 +575,40 @@ export default function CrewFlow() {
     [api, load],
   )
 
+  const handleQaFail = useCallback(
+    async (repo: string, number: number | string) => {
+      const reason = window.prompt('Motivo da reprovação no QA:')
+      if (reason === null) return
+      const key = `${repo}#${number}`
+      setQaBusyKey(key)
+      try {
+        await api.post('/api/apps/kirocrew-flow/qa-fail', { repo, number: Number(number), reason })
+        await load()
+      } catch (err) {
+        console.error('qa-fail failed:', err)
+      } finally {
+        setQaBusyKey(null)
+      }
+    },
+    [api, load],
+  )
+
+  const handleQaApprove = useCallback(
+    async (repo: string, number: number | string) => {
+      const key = `${repo}#${number}`
+      setQaBusyKey(key)
+      try {
+        await api.post('/api/apps/kirocrew-flow/qa-approve', { repo, number: Number(number) })
+        await load()
+      } catch (err) {
+        console.error('qa-approve failed:', err)
+      } finally {
+        setQaBusyKey(null)
+      }
+    },
+    [api, load],
+  )
+
   const title = project ? `Flow - ${squadName} / ${project.split('/').pop()}` : squadName
 
   const totalActive = (
@@ -488,6 +618,8 @@ export default function CrewFlow() {
     columns.dev.length +
     columns.review.length +
     columns.review_ok.length +
+    columns.qa.length +
+    columns.qa_fail.length +
     columns.blocked.length
   )
 
@@ -542,6 +674,9 @@ export default function CrewFlow() {
         columns={columns}
         onDispatch={handleDispatch}
         dispatchingKey={dispatchingKey}
+        onQaFail={handleQaFail}
+        onQaApprove={handleQaApprove}
+        qaBusyKey={qaBusyKey}
       />
 
       {/* Coluna blocked separada abaixo */}
