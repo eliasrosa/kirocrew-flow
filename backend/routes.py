@@ -8,6 +8,16 @@ from pathlib import Path
 
 from aiohttp import web
 
+# Garante que a raiz do repo está no sys.path antes de importar os módulos de
+# orquestração do backend (que por sua vez importam flow/ e deployment/).
+_APP_ROOT = Path(__file__).parent.parent
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
+
+from backend import dispatch as dispatch_mod  # noqa: E402
+from backend import issues as issues_mod  # noqa: E402
+from flow.ports.issue_provider import ProviderError  # noqa: E402
+
 
 async def _start_loops(app: web.Application) -> None:
     """Hook on_startup: inicia os 4 loops asyncio de polling da esteira."""
@@ -86,10 +96,51 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 async def handle_issues(request: web.Request) -> web.Response:
-    """Lista issues por estágio (crewflow:*). Placeholder para Fase 4."""
-    return web.json_response({"issues": [], "note": "TODO Fase 4"})
+    """Lista issues por estágio da esteira (crewflow:*), agrupadas em colunas.
+
+    Zero-token / cache-first: consome ``provider.list_by_state`` (leitura de
+    labels) via a orquestração em ``backend.issues``. Erros de provider ou
+    setup degradam para colunas vazias (HTTP 200), nunca um 500.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        columns = await loop.run_in_executor(None, issues_mod.collect_columns)
+    except ProviderError as exc:
+        print(f"[kirocrew-flow] handle_issues provider error: {exc}", flush=True)
+        columns = issues_mod.empty_columns()
+    except Exception as exc:
+        print(f"[kirocrew-flow] handle_issues error: {exc}", flush=True)
+        columns = issues_mod.empty_columns()
+    return web.json_response({"columns": columns})
 
 
 async def handle_dispatch(request: web.Request) -> web.Response:
-    """Force dispatch manual de uma issue. Placeholder para Fase 4."""
-    return web.json_response({"ok": True, "note": "TODO Fase 4"})
+    """Force dispatch manual de uma issue (body: {"repo", "number"}).
+
+    Marca a issue em ``crewflow:todo`` se necessário e dispara o estágio dev
+    pelo mesmo caminho do cron (``_run_stage`` + ``_STAGE_DEV``) via executor.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"ok": False, "error": "corpo JSON inválido"}, status=400
+        )
+
+    try:
+        repo, number = dispatch_mod.validate_body(body)
+    except dispatch_mod.DispatchError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, dispatch_mod.ensure_todo, repo, number)
+        await loop.run_in_executor(None, dispatch_mod.run_dev_stage)
+    except ProviderError as exc:
+        print(f"[kirocrew-flow] handle_dispatch provider error: {exc}", flush=True)
+        return web.json_response({"ok": False, "error": str(exc)}, status=502)
+    except Exception as exc:
+        print(f"[kirocrew-flow] handle_dispatch error: {exc}", flush=True)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    return web.json_response({"ok": True, "dispatched": True})
