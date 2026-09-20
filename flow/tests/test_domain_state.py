@@ -47,6 +47,10 @@ class TestStateConstants:
         """review-fail é resultado de review, não impede dispatch de TODO."""
         assert Modifier.REVIEW_FAIL not in STOP_MODIFIERS
 
+    def test_qa_fail_nao_e_stop_modifier(self) -> None:
+        """qa-fail é resultado de QA, não impede dispatch de TODO."""
+        assert Modifier.QA_FAIL not in STOP_MODIFIERS
+
     def test_valores_das_labels_tem_prefixo_crewflow(self) -> None:
         for s in State:
             assert s.value.startswith("crewflow:"), s
@@ -126,6 +130,11 @@ class TestParseModifiers:
         labels = {"crewflow:running", "crewflow:reviewed", "crewflow:dev"}
         result = parse_modifiers(labels)
         assert result == frozenset({Modifier.RUNNING, Modifier.REVIEWED})
+
+    def test_extrai_qa_fail(self) -> None:
+        labels = {"crewflow:qa", "crewflow:qa-fail"}
+        result = parse_modifiers(labels)
+        assert Modifier.QA_FAIL in result
 
     def test_ignora_labels_desconhecidas(self) -> None:
         labels = {"crewflow:hml-bypass", "something:unknown", "phase-1"}

@@ -124,6 +124,8 @@ def register_routes(ctx: object) -> list:
         AppRoute("GET", "/health", handle_health),
         AppRoute("GET", "/issues", handle_issues),
         AppRoute("POST", "/dispatch", handle_dispatch),
+        AppRoute("POST", "/qa-fail", handle_qa_fail),
+        AppRoute("POST", "/qa-approve", handle_qa_approve),
     ]
 
 
@@ -251,6 +253,9 @@ def _load_issues_from_github() -> dict[str, object]:
             # Issues em review + review_ok vão para coluna "review_ok"
             elif col == "review" and Modifier.REVIEW_OK in modifiers:
                 columns["review_ok"].append(issue_entry)
+            # Issues em qa + qa_fail vão para coluna "qa_fail"
+            elif col == "qa" and Modifier.QA_FAIL in modifiers:
+                columns["qa_fail"].append(issue_entry)
             else:
                 columns[col].append(issue_entry)
 
@@ -298,7 +303,7 @@ def _state_to_column(state: object) -> str | None:
         State.TODO:   "todo",
         State.DEV:    "dev",
         State.REVIEW: "review",
-        State.QA:     "review_ok",  # QA é pós-aprovação — aparece no painel Code Review/Aprovado
+        State.QA:     "qa",
         State.DONE:   "done",
     }
     if not isinstance(state, State):
@@ -316,6 +321,8 @@ def _empty_columns() -> dict[str, list[dict]]:
         "review": [],
         "review_ok": [],
         "reviewed": [],
+        "qa": [],
+        "qa_fail": [],
         "done": [],
         "blocked": [],
     }
@@ -456,6 +463,184 @@ async def handle_dispatch(request: web.Request, ctx: object = None) -> web.Respo
             {"ok": False, "error": str(exc)},
             status=500,
         )
+
+
+async def handle_qa_fail(request: web.Request, ctx: object = None) -> web.Response:
+    """Reprova uma issue no QA: adiciona crewflow:qa-fail.
+
+    Body JSON: {"repo": "owner/repo", "number": 123, "reason": "motivo opcional"}
+
+    O crewflow-dev detecta crewflow:qa-fail no próximo ciclo e:
+      1. Remove crewflow:qa-fail
+      2. Adiciona crewflow:todo
+      3. Fecha a PR atual com comentário do motivo
+      4. Despacha nova sessão dev com contexto da reprovação
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "body JSON inválido"}, status=400)
+
+    repo = body.get("repo", "")
+    number = body.get("number")
+    reason = body.get("reason", "")
+
+    if not repo or not number:
+        return web.json_response(
+            {"ok": False, "error": "campos 'repo' e 'number' são obrigatórios"},
+            status=400,
+        )
+
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "error": "'number' deve ser um inteiro"}, status=400)
+
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _mark_qa_fail, repo, number, reason)
+        return web.json_response(result)
+    except Exception as exc:
+        logger.exception("handle_qa_fail: erro inesperado: %s", exc)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
+async def handle_qa_approve(request: web.Request, ctx: object = None) -> web.Response:
+    """Aprova uma issue no QA: move para crewflow:done (ou dispara merge se configurado).
+
+    Body JSON: {"repo": "owner/repo", "number": 123}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "body JSON inválido"}, status=400)
+
+    repo = body.get("repo", "")
+    number = body.get("number")
+
+    if not repo or not number:
+        return web.json_response(
+            {"ok": False, "error": "campos 'repo' e 'number' são obrigatórios"},
+            status=400,
+        )
+
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "error": "'number' deve ser um inteiro"}, status=400)
+
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _mark_qa_approve, repo, number)
+        return web.json_response(result)
+    except Exception as exc:
+        logger.exception("handle_qa_approve: erro inesperado: %s", exc)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
+def _mark_qa_fail(repo: str, issue_number: int, reason: str) -> dict:
+    """Adiciona crewflow:qa-fail à issue e posta comentário com o motivo.
+
+    O crewflow-dev detecta qa-fail no próximo ciclo de scan e executa:
+    remover qa-fail, adicionar todo, fechar PR atual, despachar nova sessão dev.
+    """
+    app_root = Path(__file__).parent.parent
+    if str(app_root) not in sys.path:
+        sys.path.insert(0, str(app_root))
+
+    from flow.adapters import github_client as gh
+    from flow.domain.state import Modifier, parse_modifiers, parse_state
+    from flow.ports.issue_provider import ProviderError, ProviderNotFoundError
+
+    try:
+        item = gh.get_work_item(repo, str(issue_number))
+    except ProviderNotFoundError:
+        return {"ok": False, "error": f"issue #{issue_number} não encontrada em {repo!r}"}
+    except ProviderError as exc:
+        return {"ok": False, "error": f"erro ao acessar a issue: {exc}"}
+
+    current_labels = set(item.get("labels", []))
+    modifiers = parse_modifiers(current_labels)
+
+    # A issue deve estar em crewflow:qa
+    state = parse_state(current_labels)
+    from flow.domain.state import State
+    if state is not State.QA:
+        return {
+            "ok": False,
+            "error": f"issue #{issue_number} não está em crewflow:qa (estado atual: {state})",
+        }
+
+    # Adiciona qa-fail (mantém qa para o backend saber que estava no QA)
+    if Modifier.QA_FAIL.value not in current_labels:
+        current_labels.add(Modifier.QA_FAIL.value)
+        try:
+            gh.set_labels(repo, str(issue_number), sorted(current_labels))
+        except ProviderError as exc:
+            return {"ok": False, "error": f"erro ao aplicar crewflow:qa-fail: {exc}"}
+
+    # Posta comentário com o motivo da reprovação (para o próximo agente ler)
+    if reason:
+        import contextlib
+        with contextlib.suppress(Exception):
+            gh.add_issue_comment(
+                repo,
+                issue_number,
+                f"❌ **QA Reprovado** — motivo: {reason}\n\n"
+                f"O cron vai detectar `crewflow:qa-fail` e despachar nova sessão dev "
+                f"com o contexto desta reprovação.",
+            )
+
+    return {"ok": True, "qa_fail": True}
+
+
+def _mark_qa_approve(repo: str, issue_number: int) -> dict:
+    """Aprova a issue no QA: move para crewflow:done.
+
+    Remove crewflow:qa e adiciona crewflow:done.
+    O merge da PR fica pendente para o operador (ou auto_merge_on_approve se configurado).
+    """
+    app_root = Path(__file__).parent.parent
+    if str(app_root) not in sys.path:
+        sys.path.insert(0, str(app_root))
+
+    from flow.adapters import github_client as gh
+    from flow.domain.state import State, parse_state, transition_state
+    from flow.ports.issue_provider import ProviderError, ProviderNotFoundError
+
+    try:
+        item = gh.get_work_item(repo, str(issue_number))
+    except ProviderNotFoundError:
+        return {"ok": False, "error": f"issue #{issue_number} não encontrada em {repo!r}"}
+    except ProviderError as exc:
+        return {"ok": False, "error": f"erro ao acessar a issue: {exc}"}
+
+    current_labels = set(item.get("labels", []))
+    state = parse_state(current_labels)
+
+    if state is not State.QA:
+        return {
+            "ok": False,
+            "error": f"issue #{issue_number} não está em crewflow:qa (estado atual: {state})",
+        }
+
+    new_labels = transition_state(current_labels, State.DONE)
+    # Remove modificadores de QA
+    new_labels = new_labels - {"crewflow:qa-fail", "crewflow:running"}
+    try:
+        gh.set_labels(repo, str(issue_number), sorted(new_labels))
+    except ProviderError as exc:
+        return {"ok": False, "error": f"erro ao aplicar crewflow:done: {exc}"}
+
+    import contextlib
+    with contextlib.suppress(Exception):
+        gh.add_issue_comment(
+            repo,
+            issue_number,
+            "✅ **QA Aprovado** — issue movida para `crewflow:done`.",
+        )
+
+    return {"ok": True, "qa_approved": True}
 
 
 def _force_dispatch(repo: str, issue_number: int) -> dict:

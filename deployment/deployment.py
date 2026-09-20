@@ -2807,6 +2807,7 @@ _STAGE_DEV      = "dev"
 _STAGE_REVIEWER = "reviewer"
 _STAGE_MERGE    = "merge"
 _STAGE_CONFLITO = "conflito"
+_STAGE_QA       = "qa"
 
 # ActionKinds por estágio — o filtro que cada entrypoint aplica sobre o scan
 #
@@ -2816,11 +2817,13 @@ _STAGE_CONFLITO = "conflito"
 #   - dispatch_conflict_resolver → _STAGE_CONFLITO: despachado quando crewflow:conflito
 #                          já foi aplicado na issue (Modifier.CONFLITO presente).
 #   - dispatch_rework    → _STAGE_CONFLITO: re-trabalho pós-review (review-fail).
+#   - dispatch_qa_retry  → _STAGE_QA: despacha nova sessão dev após reprovação no QA.
 _STAGE_ACTIONS = {
     _STAGE_DEV:      frozenset({"dispatch_dev"}),
     _STAGE_REVIEWER: frozenset({"dispatch_reviewer", "mark_conflito"}),
     _STAGE_MERGE:    frozenset({"merge_pr"}),
     _STAGE_CONFLITO: frozenset({"dispatch_rework", "dispatch_conflict_resolver"}),
+    _STAGE_QA:       frozenset({"dispatch_qa_retry"}),
 }
 
 
@@ -2963,6 +2966,7 @@ def _run_stage(ctx: object, stage: str) -> None:
     dispatch_devs: list = []
     dispatch_reviewers: list = []
     dispatch_reworks: list = []
+    dispatch_qa_retries: list = []  # (repo, issue, reason_comment) — nova sessão dev após QA fail
     conflict_resolvers: list = []  # (repo, issue) — despacha sessão de resolução de conflito
     mark_conflitos: list = []      # issues para marcar crewflow:conflito
     needs_human: list = []
@@ -3063,6 +3067,13 @@ def _run_stage(ctx: object, stage: str) -> None:
             issue = _scan_result_to_issue(result)
             dispatch_reworks.append((repo, issue, state_comment))
 
+        elif decision.action is ActionKind.DISPATCH_QA_RETRY:
+            repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
+            if not repo:
+                repo = repos[0] if repos else ""
+            issue = _scan_result_to_issue(result)
+            dispatch_qa_retries.append((repo, issue, state_comment))
+
     # ── Identifica candidatos de sessão morta para o estágio dev ─────────
     if stage == _STAGE_DEV:
         for _r_ds in scan_results:
@@ -3094,7 +3105,7 @@ def _run_stage(ctx: object, stage: str) -> None:
     )
 
     if not any([spec_invalid, dispatch_devs, dispatch_reviewers, dispatch_reworks,
-                conflict_resolvers, mark_conflitos,
+                conflict_resolvers, mark_conflitos, dispatch_qa_retries,
                 needs_human, blocked_bypass, rebranded, merge_prs, dead_session_candidates_stage]):
         return
 
@@ -3352,6 +3363,109 @@ def _run_stage(ctx: object, stage: str) -> None:
                     repo, issue_number, exc,
                 )
 
+    elif stage == _STAGE_QA:
+        # ── Processa retorno automático do QA: crewflow:qa-fail ──────────
+        # Para cada issue com qa-fail:
+        #   1. Lê o comentário mais recente (motivo da reprovação)
+        #   2. Fecha a PR atual com comentário explicativo
+        #   3. Remove qa-fail + qa, adiciona todo
+        #   4. Despacha nova sessão dev com contexto da reprovação
+        for repo, issue, _sc in dispatch_qa_retries:
+            issue_number = issue["number"]
+            if not auto:
+                ctx.notify(  # type: ignore[attr-defined]
+                    f"KiroCrew Flow [qa] (Fase 1): retorno de QA pendente — "
+                    f"{repo}#{issue_number}: {issue['title']}.{vm}\n"
+                    f"  Ative auto_dispatch para despachar automaticamente."
+                )
+                continue
+
+            # Fecha a PR atual antes de redispachar (nova PR será criada pelo dev)
+            branch_qa = f"feat/issue-{issue_number}"
+            pr_number_qa: int | None = None
+            try:
+                _pr_qa_res = subprocess.run(
+                    ["gh", "pr", "list", "--repo", repo, "--head", branch_qa,
+                     "--state", "open", "--json", "number"],
+                    capture_output=True, text=True, timeout=15, check=False,
+                )
+                if _pr_qa_res.returncode == 0:
+                    _prs_qa = json.loads(_pr_qa_res.stdout or "[]")
+                    if _prs_qa:
+                        pr_number_qa = int(_prs_qa[0]["number"])
+            except Exception as exc_qa:
+                logger.warning(
+                    "deployment[qa]: erro ao localizar PR para qa-fail %s#%s: %s",
+                    repo, issue_number, exc_qa,
+                )
+
+            if pr_number_qa:
+                try:
+                    subprocess.run(
+                        ["gh", "pr", "close", str(pr_number_qa), "--repo", repo,
+                         "--comment",
+                         f"❌ PR fechada após reprovação no QA. Uma nova PR será criada pelo dev após correção."],
+                        capture_output=True, text=True, timeout=15, check=False,
+                    )
+                    logger.info(
+                        "deployment[qa]: PR #%s fechada após qa-fail de %s#%s",
+                        pr_number_qa, repo, issue_number,
+                    )
+                except Exception as exc_close:
+                    logger.warning(
+                        "deployment[qa]: falha ao fechar PR #%s: %s — continuando dispatch",
+                        pr_number_qa, exc_close,
+                    )
+
+            # Transição atômica: remove qa-fail + qa, adiciona todo
+            try:
+                _item_qa = provider.get_work_item(repo, str(issue_number))  # type: ignore[attr-defined]
+                _current_qa = list(_item_qa.get("labels", []))
+                new_labels_qa = _apply_state_transition(
+                    _current_qa,
+                    State.TODO,
+                    remove_modifiers=("crewflow:qa-fail", "crewflow:running"),
+                )
+                provider.set_labels(repo, str(issue_number), new_labels_qa)  # type: ignore[attr-defined]
+                logger.info(
+                    "deployment[qa]: %s#%s → crewflow:todo (após qa-fail)",
+                    repo, issue_number,
+                )
+            except Exception as exc_lbl:
+                logger.error(
+                    "deployment[qa]: falha ao atualizar labels de %s#%s: %s — dispatch abortado",
+                    repo, issue_number, exc_lbl,
+                )
+                continue
+
+            # Despacha nova sessão dev com contexto da reprovação de QA
+            # O agente vai ler os comentários da issue para entender o motivo
+            prompt_extra_qa = (
+                "## ⚠️ Retorno do QA\n\n"
+                "Esta issue foi **reprovada no QA**. Leia os comentários mais recentes da issue "
+                "para entender o motivo da reprovação antes de implementar. "
+                "Crie uma **nova PR** (a PR anterior foi fechada)."
+            )
+            if squad and squad.dispatch_prompt_extra:
+                prompt_extra_qa = prompt_extra_qa + "\n\n" + squad.dispatch_prompt_extra
+            try:
+                _dispatch(ctx, repo, issue, cfg, prompt_extra=prompt_extra_qa)
+                logger.info(
+                    "deployment[qa]: nova sessão dev despachada para %s#%s (pós qa-fail)",
+                    repo, issue_number,
+                )
+            except Exception as exc_disp:
+                logger.error(
+                    "deployment[qa]: erro ao despachar sessão dev para %s#%s: %s",
+                    repo, issue_number, exc_disp,
+                )
+
+        if dispatch_qa_retries and auto:
+            linhas_qa = "\n".join(f"  - {r}#{i['number']}: {i['title']}" for r, i, _ in dispatch_qa_retries)
+            ctx.notify(  # type: ignore[attr-defined]
+                f"KiroCrew Flow [qa]: {len(dispatch_qa_retries)} issue(s) retornaram do QA para dev.{vm}\n{linhas_qa}"
+            )
+
 
 def run_dev(ctx: object) -> None:
     """Entrypoint do cron de implementação.
@@ -3417,3 +3531,20 @@ def run_conflito(ctx: object) -> None:
                  every=300)
     """
     _run_stage(ctx, _STAGE_CONFLITO)
+
+
+def run_qa(ctx: object) -> None:
+    """Entrypoint do cron de retorno do QA.
+
+    Detecta issues com ``crewflow:qa-fail``, fecha a PR atual,
+    volta a issue para ``crewflow:todo`` e despacha nova sessão dev
+    com contexto da reprovação. Intervalo recomendado: 300s.
+
+    Configure o modelo via ``stage_models.qa`` na deployment.config.yaml.
+
+    Registro (uma vez):
+        cron_add(name="crewflow-qa",
+                 script="~/.kiro/crew/crons/deployment.py:run_qa",
+                 every=300)
+    """
+    _run_stage(ctx, _STAGE_QA)

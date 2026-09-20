@@ -27,6 +27,7 @@ class ActionKind(StrEnum):
     DISPATCH_REVIEWER         = "dispatch_reviewer"         # dispara kiro-reviewer
     DISPATCH_REWORK           = "dispatch_rework"           # dispara sessão dev de re-trabalho (pós-review com pedidos)
     DISPATCH_CONFLICT_RESOLVER = "dispatch_conflict_resolver"  # dispara sessão de resolução de conflito
+    DISPATCH_QA_RETRY         = "dispatch_qa_retry"         # dispara sessão dev após reprovação no QA (nova PR)
     NOTIFY_HUMAN              = "notify_human"              # avisa humano (TL, QA, Dev)
     BLOCK                     = "block"                     # marca crewflow:blocked + motivo
     REBRAND                   = "rebrand"                   # troca de template (GATE 0 do hotfix)
@@ -229,6 +230,21 @@ def decide(
             reason="crewflow:conflito detectado — despachando sessão de resolução de conflito",
             add_labels=("crewflow:running",),
             remove_labels=("crewflow:conflito",),
+        )
+
+    # ── Retorno automático do QA: crewflow:qa-fail ────────────────────
+    # Quando o QA reprova (operador clica "Reprovar QA" na UI), o motor detecta
+    # crewflow:qa-fail e despacha uma nova sessão dev que:
+    #   - lê os comentários da issue (motivo da reprovação)
+    #   - cria uma NOVA branch/PR (a correção pode exigir mudanças maiores)
+    #   - o operator fecha a PR atual manualmente se desejar
+    # A issue volta para crewflow:todo para que o cron dev pegue no próximo ciclo.
+    if Modifier.QA_FAIL in modifiers:
+        return ExecutorDecision(
+            action=ActionKind.DISPATCH_QA_RETRY,
+            reason="QA reprovou — retornando para crewflow:todo e despachando nova sessão dev com contexto de reprovação",
+            add_labels=("crewflow:todo",),
+            remove_labels=("crewflow:qa-fail", "crewflow:qa", "crewflow:running"),
         )
 
     # ── Ciclo de re-trabalho pós-review: crewflow:review-fail ─────────

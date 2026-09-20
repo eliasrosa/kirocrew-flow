@@ -38,6 +38,8 @@ from backend.routes import (  # noqa: E402
     handle_dispatch,
     handle_health,
     handle_issues,
+    handle_qa_approve,
+    handle_qa_fail,
     register_routes,
 )
 
@@ -109,9 +111,19 @@ class TestRegisterRoutes:
         methods_paths = {(r.method, r.path) for r in routes}
         assert ("POST", "/dispatch") in methods_paths
 
+    def test_registers_qa_fail_route(self) -> None:
+        routes = self._get_routes()
+        methods_paths = {(r.method, r.path) for r in routes}
+        assert ("POST", "/qa-fail") in methods_paths
+
+    def test_registers_qa_approve_route(self) -> None:
+        routes = self._get_routes()
+        methods_paths = {(r.method, r.path) for r in routes}
+        assert ("POST", "/qa-approve") in methods_paths
+
     def test_three_explicit_routes(self) -> None:
         routes = self._get_routes()
-        assert len(routes) == 3, f"esperado 3 rotas, obtido {len(routes)}"
+        assert len(routes) == 5, f"esperado 5 rotas, obtido {len(routes)}"
 
     def test_handlers_are_callable(self) -> None:
         routes = self._get_routes()
@@ -337,8 +349,9 @@ class TestStateToColumn:
         assert _state_to_column(State.REVIEW) == "review"
 
     def test_qa_maps_to_reviewed(self) -> None:
+        """State.QA mapeava para review_ok; agora mapeia para 'qa' (seção separada)."""
         from flow.domain.state import State
-        assert _state_to_column(State.QA) == "review_ok"
+        assert _state_to_column(State.QA) == "qa"
 
     def test_done_maps_to_done(self) -> None:
         from flow.domain.state import State
@@ -351,6 +364,11 @@ class TestStateToColumn:
     def test_ready_maps_to_ready(self) -> None:
         from flow.domain.state import State
         assert _state_to_column(State.READY) == "ready"
+
+    def test_qa_maps_to_qa(self) -> None:
+        """State.QA deve mapear para coluna 'qa' (não 'review_ok')."""
+        from flow.domain.state import State
+        assert _state_to_column(State.QA) == "qa"
 
 
 class TestRepoFromKey:
@@ -369,6 +387,11 @@ class TestEmptyColumns:
         cols = _empty_columns()
         for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "reviewed", "done", "blocked"):
             assert key in cols
+
+    def test_has_qa_columns(self) -> None:
+        cols = _empty_columns()
+        assert "qa" in cols
+        assert "qa_fail" in cols
 
     def test_all_values_are_empty_lists(self) -> None:
         cols = _empty_columns()
@@ -457,3 +480,79 @@ class TestStopLoops:
         app = web.Application()
         app["crewflow_tasks"] = []
         asyncio.get_event_loop().run_until_complete(_stop_loops(app))
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_qa_fail
+# ---------------------------------------------------------------------------
+
+
+class TestHandleQaFail:
+    def test_returns_error_for_invalid_body(self) -> None:
+        req = _make_request(None)
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_fail(req))
+        body = _parse_body(response)
+        assert body["ok"] is False
+        assert response.status == 400  # type: ignore[union-attr]
+
+    def test_returns_error_for_missing_repo(self) -> None:
+        req = _make_request({"number": 42})
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_fail(req))
+        body = _parse_body(response)
+        assert body["ok"] is False
+
+    def test_returns_error_for_missing_number(self) -> None:
+        req = _make_request({"repo": "owner/repo"})
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_fail(req))
+        body = _parse_body(response)
+        assert body["ok"] is False
+
+    def test_calls_mark_qa_fail_with_correct_args(self) -> None:
+        req = _make_request({"repo": "owner/repo", "number": 42, "reason": "layout errado"})
+        with mock.patch("backend.routes._mark_qa_fail", return_value={"ok": True, "qa_fail": True}) as mock_fn:
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_qa_fail(req))
+        mock_fn.assert_called_once_with("owner/repo", 42, "layout errado")
+        body = _parse_body(response)
+        assert body["ok"] is True
+
+    def test_reason_defaults_to_empty_string(self) -> None:
+        req = _make_request({"repo": "owner/repo", "number": 42})
+        with mock.patch("backend.routes._mark_qa_fail", return_value={"ok": True, "qa_fail": True}) as mock_fn:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(handle_qa_fail(req))
+        mock_fn.assert_called_once_with("owner/repo", 42, "")
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_qa_approve
+# ---------------------------------------------------------------------------
+
+
+class TestHandleQaApprove:
+    def test_returns_error_for_invalid_body(self) -> None:
+        req = _make_request(None)
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_approve(req))
+        body = _parse_body(response)
+        assert body["ok"] is False
+        assert response.status == 400  # type: ignore[union-attr]
+
+    def test_returns_error_for_missing_repo(self) -> None:
+        req = _make_request({"number": 42})
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_approve(req))
+        body = _parse_body(response)
+        assert body["ok"] is False
+
+    def test_calls_mark_qa_approve_with_correct_args(self) -> None:
+        req = _make_request({"repo": "owner/repo", "number": 42})
+        with mock.patch("backend.routes._mark_qa_approve", return_value={"ok": True, "qa_approved": True}) as mock_fn:
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_qa_approve(req))
+        mock_fn.assert_called_once_with("owner/repo", 42)
+        body = _parse_body(response)
+        assert body["ok"] is True

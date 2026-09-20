@@ -79,6 +79,7 @@ class Modifier(StrEnum):
     CONFLITO          = "crewflow:conflito"           # PR tem conflito de merge ou base desatualizada
     REVIEW_OK         = "crewflow:review-ok"          # reviewer aprovou — pronto para merge (substitui review+reviewed)
     REVIEW_FAIL       = "crewflow:review-fail"        # reviewer reprovou — aguarda rework (substitui review+changes-requested)
+    QA_FAIL           = "crewflow:qa-fail"            # QA reprovou — aguarda retorno ao dev com nova PR
 
 
 # Modificadores que impedem dispatch mesmo com o estado correto.

@@ -47,6 +47,9 @@ LABELS=(
   #   review-fail = reviewer reprovou, aguarda rework  (substitui review+changes-requested)
   "crewflow:review-ok|22C55E|Reviewer aprovou — pronto para merge"
   "crewflow:review-fail|DC2626|Reviewer reprovou — aguarda rework"
+  # Resultado de QA:
+  #   qa-fail = QA reprovou — aguarda retorno ao dev com nova PR (dispatch automático)
+  "crewflow:qa-fail|DC2626|QA reprovou — aguarda retorno ao dev com nova PR"
 
   # ── TIPO DE FLUXO (routing: define qual workflow aplicar) ────────────
   "crewflow:feature|A855F7|Feature nova"

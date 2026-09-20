@@ -26,6 +26,8 @@ interface Columns {
   review: Issue[]
   review_ok: Issue[]
   reviewed: Issue[]
+  qa: Issue[]
+  qa_fail: Issue[]
   done: Issue[]
   blocked: Issue[]
 }
@@ -59,6 +61,8 @@ function emptyColumns(): Columns {
     review: [],
     review_ok: [],
     reviewed: [],
+    qa: [],
+    qa_fail: [],
     done: [],
     blocked: [],
   }
@@ -92,6 +96,12 @@ const MOCK_RESPONSE: ApiResponse = {
       { number: 103, title: 'Exemplo: PR aprovado, aguardando merge', repo: 'eliasrosa/kirocrew-flow', url: '', age_min: 15, labels: ['crewflow:feature', 'crewflow:review-ok'], blocked: false, running: false },
     ],
     reviewed: [],
+    qa: [
+      { number: 104, title: 'Exemplo: feature em teste no HML', repo: 'eliasrosa/kirocrew-flow', url: '', age_min: 60, labels: ['crewflow:qa', 'crewflow:feature'], blocked: false, running: false },
+    ],
+    qa_fail: [
+      { number: 105, title: 'Exemplo: feature reprovada no QA', repo: 'eliasrosa/kirocrew-flow', url: '', age_min: 30, labels: ['crewflow:qa', 'crewflow:qa-fail', 'crewflow:feature'], blocked: false, running: false },
+    ],
     done: [],
     blocked: [
       { number: 102, title: 'Exemplo: issue bloqueada', repo: 'eliasrosa/kirocrew-flow', url: '', age_min: 240, labels: ['crewflow:debt'], blocked: true, running: false },
@@ -109,7 +119,8 @@ const COLUMN_TO_IMPLICIT: Record<string, string> = {
   todo: 'todo',
   dev: 'dev',
   review: 'review',
-  reviewed: 'review',  // QA está na coluna reviewed; implicit equivalente é review/review_ok
+  reviewed: 'review',
+  qa: 'qa',
   done: 'done',
   blocked: '',
 }
@@ -133,9 +144,13 @@ interface IssueCardProps {
   onDispatch?: (repo: string, number: number | string) => Promise<void>
   dispatching?: boolean
   column?: string
+  showQaButtons?: boolean
+  onQaFail?: (repo: string, number: number | string) => Promise<void>
+  onQaApprove?: (repo: string, number: number | string) => Promise<void>
+  qaActioning?: string  // 'fail' | 'approve' | null
 }
 
-function IssueCard({ issue, showDispatch, onDispatch, dispatching, column = '' }: IssueCardProps) {
+function IssueCard({ issue, showDispatch, onDispatch, dispatching, column = '', showQaButtons, onQaFail, onQaApprove, qaActioning }: IssueCardProps) {
   const divergent = hasDivergence(issue, column)
   return (
     <Card style={{ marginBottom: 8, padding: '10px 12px' }}>
@@ -175,17 +190,41 @@ function IssueCard({ issue, showDispatch, onDispatch, dispatching, column = '' }
             )}
           </div>
         </div>
-        {showDispatch && onDispatch && (
-          <Btn
-            size="sm"
-            variant="secondary"
-            disabled={dispatching}
-            onClick={() => onDispatch(issue.repo, issue.number)}
-            style={{ flexShrink: 0, fontSize: 11 }}
-          >
-            {dispatching ? '...' : 'Dispatch'}
-          </Btn>
-        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+          {showDispatch && onDispatch && (
+            <Btn
+              size="sm"
+              variant="secondary"
+              disabled={dispatching}
+              onClick={() => onDispatch(issue.repo, issue.number)}
+              style={{ fontSize: 11 }}
+            >
+              {dispatching ? '...' : 'Dispatch'}
+            </Btn>
+          )}
+          {showQaButtons && onQaApprove && (
+            <Btn
+              size="sm"
+              variant="primary"
+              disabled={!!qaActioning}
+              onClick={() => onQaApprove(issue.repo, issue.number)}
+              style={{ fontSize: 11, background: '#22c55e', borderColor: '#16a34a' }}
+            >
+              {qaActioning === 'approve' ? '...' : '✓ Aprovar QA'}
+            </Btn>
+          )}
+          {showQaButtons && onQaFail && (
+            <Btn
+              size="sm"
+              variant="secondary"
+              disabled={!!qaActioning}
+              onClick={() => onQaFail(issue.repo, issue.number)}
+              style={{ fontSize: 11, color: '#dc2626', borderColor: '#dc2626' }}
+            >
+              {qaActioning === 'fail' ? '...' : '✗ Reprovar QA'}
+            </Btn>
+          )}
+        </div>
       </div>
       {issue.url && (
         <a
@@ -213,9 +252,13 @@ interface SubColumnProps {
   onDispatch?: (repo: string, number: number | string) => Promise<void>
   dispatchingKey?: string
   columnKey?: string
+  showQaButtons?: boolean
+  onQaFail?: (repo: string, number: number | string) => Promise<void>
+  onQaApprove?: (repo: string, number: number | string) => Promise<void>
+  qaActioningKey?: string
 }
 
-function SubColumn({ title, issues, color, showDispatch, onDispatch, dispatchingKey, columnKey = '' }: SubColumnProps) {
+function SubColumn({ title, issues, color, showDispatch, onDispatch, dispatchingKey, columnKey = '', showQaButtons, onQaFail, onQaApprove, qaActioningKey }: SubColumnProps) {
   return (
     <div style={{ flex: 1, minWidth: 160 }}>
       <div style={{
@@ -248,6 +291,9 @@ function SubColumn({ title, issues, color, showDispatch, onDispatch, dispatching
       ) : (
         issues.map((issue) => {
           const key = `${issue.repo}#${issue.number}`
+          const qaActioning = qaActioningKey?.startsWith(key + ':')
+            ? qaActioningKey.split(':')[1]
+            : undefined
           return (
             <IssueCard
               key={key}
@@ -256,6 +302,10 @@ function SubColumn({ title, issues, color, showDispatch, onDispatch, dispatching
               onDispatch={onDispatch}
               dispatching={dispatchingKey === key}
               column={columnKey}
+              showQaButtons={showQaButtons}
+              onQaFail={onQaFail}
+              onQaApprove={onQaApprove}
+              qaActioning={qaActioning}
             />
           )
         })
@@ -303,16 +353,79 @@ function WaitingSection({ title, subtitle, issues, accentColor }: WaitingSection
 }
 
 // ---------------------------------------------------------------------------
-// AgentsPanel — painel duplo Desenvolvimento + Code Review
+// QAPanel — painel de QA com sub-colunas Em teste / Reprovado
+// ---------------------------------------------------------------------------
+
+interface QAPanelProps {
+  columns: Columns
+  onQaFail: (repo: string, number: number | string) => Promise<void>
+  onQaApprove: (repo: string, number: number | string) => Promise<void>
+  qaActioningKey: string | null
+}
+
+function QAPanel({ columns, onQaFail, onQaApprove, qaActioningKey }: QAPanelProps) {
+  const total = columns.qa.length + columns.qa_fail.length
+  return (
+    <div style={{
+      flex: 1,
+      minWidth: 300,
+    }}>
+      <div style={{
+        fontWeight: 700,
+        fontSize: 13,
+        marginBottom: 12,
+        paddingBottom: 6,
+        borderBottom: '2px solid #0ea5e9',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+      }}>
+        <span>QA</span>
+        <span style={{
+          background: '#0ea5e9',
+          color: '#fff',
+          borderRadius: 10,
+          padding: '1px 7px',
+          fontSize: 11,
+          fontWeight: 700,
+        }}>
+          {total}
+        </span>
+      </div>
+      <div style={{ display: 'flex', gap: 12 }}>
+        <SubColumn
+          title="Em teste"
+          issues={columns.qa}
+          color="#0ea5e9"
+          showQaButtons
+          onQaFail={onQaFail}
+          onQaApprove={onQaApprove}
+          qaActioningKey={qaActioningKey ?? undefined}
+        />
+        <SubColumn
+          title="Reprovado ✗"
+          issues={columns.qa_fail}
+          color="#dc2626"
+        />
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// AgentsPanel — painel duplo Desenvolvimento + Code Review + QA
 // ---------------------------------------------------------------------------
 
 interface AgentsPanelProps {
   columns: Columns
   onDispatch: (repo: string, number: number | string) => Promise<void>
   dispatchingKey: string | null
+  onQaFail: (repo: string, number: number | string) => Promise<void>
+  onQaApprove: (repo: string, number: number | string) => Promise<void>
+  qaActioningKey: string | null
 }
 
-function AgentsPanel({ columns, onDispatch, dispatchingKey }: AgentsPanelProps) {
+function AgentsPanel({ columns, onDispatch, dispatchingKey, onQaFail, onQaApprove, qaActioningKey }: AgentsPanelProps) {
   return (
     <div style={{
       border: '1px solid rgba(128,128,128,0.15)',
@@ -407,6 +520,14 @@ function AgentsPanel({ columns, onDispatch, dispatchingKey }: AgentsPanelProps) 
             />
           </div>
         </div>
+
+        {/* Painel: QA */}
+        <QAPanel
+          columns={columns}
+          onQaFail={onQaFail}
+          onQaApprove={onQaApprove}
+          qaActioningKey={qaActioningKey}
+        />
       </div>
     </div>
   )
@@ -426,6 +547,7 @@ export default function CrewFlow() {
   const [isMock, setIsMock] = useState(false)
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
   const [dispatchingKey, setDispatchingKey] = useState<string | null>(null)
+  const [qaActioningKey, setQaActioningKey] = useState<string | null>(null)
 
   const load = useCallback(() => {
     return api
@@ -479,6 +601,39 @@ export default function CrewFlow() {
     [api, load],
   )
 
+  const handleQaFail = useCallback(
+    async (repo: string, number: number | string) => {
+      const key = `${repo}#${number}:fail`
+      setQaActioningKey(key)
+      try {
+        const reason = window.prompt(`Motivo da reprovação do QA para #${number}:`) ?? ''
+        await api.post('/api/apps/kirocrew-flow/qa-fail', { repo, number: Number(number), reason })
+        await load()
+      } catch (err) {
+        console.error('qa-fail failed:', err)
+      } finally {
+        setQaActioningKey(null)
+      }
+    },
+    [api, load],
+  )
+
+  const handleQaApprove = useCallback(
+    async (repo: string, number: number | string) => {
+      const key = `${repo}#${number}:approve`
+      setQaActioningKey(key)
+      try {
+        await api.post('/api/apps/kirocrew-flow/qa-approve', { repo, number: Number(number) })
+        await load()
+      } catch (err) {
+        console.error('qa-approve failed:', err)
+      } finally {
+        setQaActioningKey(null)
+      }
+    },
+    [api, load],
+  )
+
   const title = project ? `Flow - ${squadName} / ${project.split('/').pop()}` : squadName
 
   const totalActive = (
@@ -488,6 +643,8 @@ export default function CrewFlow() {
     columns.dev.length +
     columns.review.length +
     columns.review_ok.length +
+    columns.qa.length +
+    columns.qa_fail.length +
     columns.blocked.length
   )
 
@@ -537,11 +694,14 @@ export default function CrewFlow() {
         />
       </div>
 
-      {/* Seção de agentes */}
+      {/* Seção de agentes (Dev + Code Review + QA) */}
       <AgentsPanel
         columns={columns}
         onDispatch={handleDispatch}
         dispatchingKey={dispatchingKey}
+        onQaFail={handleQaFail}
+        onQaApprove={handleQaApprove}
+        qaActioningKey={qaActioningKey}
       />
 
       {/* Coluna blocked separada abaixo */}

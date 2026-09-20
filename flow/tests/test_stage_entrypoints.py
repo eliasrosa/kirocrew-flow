@@ -30,6 +30,7 @@ from deployment.deployment import (  # noqa: E402
     run_conflito,
     run_dev,
     run_merge,
+    run_qa,
     run_reviewer,
 )
 
@@ -784,3 +785,80 @@ class TestDryRunPorEstagio:
             run_reviewer(ctx)
 
         mock_rev.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# run_qa — só despacha DISPATCH_QA_RETRY (crewflow:qa-fail)
+# ---------------------------------------------------------------------------
+
+class TestRunQa:
+    def _make_qa_fail_result(self) -> object:
+        from flow.domain.gates import WorkItem
+        from flow.domain.state import Modifier, State
+        from flow.scan.scanner import ScanResult
+        return ScanResult(
+            item=WorkItem(
+                key="https://github.com/owner/repo/issues/55",
+                title="[owner/repo] Feature reprovada QA",
+                labels=frozenset(["crewflow:qa", "crewflow:qa-fail", "crewflow:feature"]),
+            ),
+            current_state=State.QA,
+            modifiers=frozenset([Modifier.QA_FAIL]),
+            dispatch_candidate=False,
+            spec_valid=None,
+            changed=True,
+            reason="qa reprovou",
+        )
+
+    def test_run_qa_despacha_para_issue_com_qa_fail(self) -> None:
+        """run_qa chama _dispatch para issue em crewflow:qa-fail."""
+        ctx = _make_ctx()
+        result = self._make_qa_fail_result()
+
+        dispatch_calls: list = []
+
+        def _fake_dispatch(ctx: object, repo: str, issue: dict, cfg: dict, **kw: object) -> None:
+            dispatch_calls.append({"repo": repo, "number": issue["number"]})
+
+        fake_conn = sqlite3.connect(":memory:")
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config()),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache", return_value=fake_conn),
+            mock.patch("deployment.deployment.provider_for") as mock_pf,
+            mock.patch("deployment.deployment._dispatch", side_effect=_fake_dispatch),
+            mock.patch("deployment.deployment._is_issue_closed", return_value=False),
+            mock.patch("subprocess.run", return_value=mock.MagicMock(
+                returncode=0, stdout="[]", stderr="")),
+        ):
+            mock_pf.return_value = mock.MagicMock(**{
+                "get_work_item.return_value": {"labels": ["crewflow:qa", "crewflow:qa-fail", "crewflow:feature"]},
+                "set_labels.return_value": None,
+            })
+            run_qa(ctx)
+
+        fake_conn.close()
+        assert len(dispatch_calls) == 1
+        assert dispatch_calls[0]["number"] == 55
+
+    def test_run_qa_nao_despacha_para_issue_em_todo(self) -> None:
+        """run_qa NÃO toca em issues crewflow:todo (pertence ao cron dev)."""
+        ctx = _make_ctx()
+        result = _make_scan_result("crewflow:todo")
+        fake_conn = sqlite3.connect(":memory:")
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config()),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache", return_value=fake_conn),
+            mock.patch("deployment.deployment.provider_for") as mock_pf,
+            mock.patch("deployment.deployment._dispatch") as mock_dispatch,
+        ):
+            mock_pf.return_value = mock.MagicMock()
+            run_qa(ctx)
+
+        fake_conn.close()
+        mock_dispatch.assert_not_called()

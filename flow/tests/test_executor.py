@@ -97,6 +97,28 @@ class TestDecideFeature:
         assert d.action is ActionKind.NOTIFY_HUMAN
         assert d.notify_role is HumanRole.QA
 
+    def test_qa_fail_despacha_retry(self) -> None:
+        """crewflow:qa-fail deve disparar DISPATCH_QA_RETRY."""
+        r = _result(
+            state=State.QA,
+            labels=["crewflow:qa", "crewflow:qa-fail", "crewflow:feature"],
+            modifiers={Modifier.QA_FAIL},
+        )
+        d = decide(r)
+        assert d.action is ActionKind.DISPATCH_QA_RETRY
+
+    def test_qa_fail_remove_qa_fail_e_qa(self) -> None:
+        """qa-fail remove qa-fail + qa e adiciona todo."""
+        r = _result(
+            state=State.QA,
+            labels=["crewflow:qa", "crewflow:qa-fail", "crewflow:feature"],
+            modifiers={Modifier.QA_FAIL},
+        )
+        d = decide(r)
+        assert "crewflow:qa-fail" in d.remove_labels
+        assert "crewflow:qa" in d.remove_labels
+        assert "crewflow:todo" in d.add_labels
+
     def test_done_skip(self) -> None:
         r = _result(state=State.DONE, labels=["crewflow:done"])
         d = decide(r)
