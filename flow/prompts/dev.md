@@ -32,7 +32,15 @@ Execute UMA vez, do início ao fim, e PARE:
    Trabalhe DENTRO do worktree; remova-o ao fim. NUNCA toque em outros worktrees.
 4. Implemente EXATAMENTE o escopo — nada além.
 5. DOCS: atualize README, steerings e docs/ se a mudança afeta comportamento, arquitetura ou convenções. Não atualize se a mudança for puramente interna (bugfix, refactor).
-6. Valide localmente (build/testes). Se falhar e não conseguir corrigir, pare em `crewflow:blocked`.
+6. VALIDAÇÃO OBRIGATÓRIA E BLOQUEANTE — rode os MESMOS checks do CI DENTRO do worktree, ANTES de abrir a PR. Só prossiga para o passo 7 se TODOS passarem (verde). Para o kirocrew-flow:
+   ```bash
+   python3 -m ruff check flow/
+   python3 -m mypy flow/ --ignore-missing-imports
+   python3 -m pytest flow/tests/ --cov=flow --cov-fail-under=75
+   ```
+   Se o repo alvo NÃO for o kirocrew-flow, use os comandos de lint/type-check/test daquele projeto — descubra via `README.md`, `Makefile`/`Makefile.*`, `pyproject.toml`/`package.json`/`.github/workflows/*.yml`. NÃO presuma; se não houver checks definidos, rode ao menos o build/test padrão do projeto.
+   Se QUALQUER check falhar e você não conseguir corrigir dentro deste one-shot: NÃO abra a PR, marque `crewflow:blocked`, comente o erro na issue e ENCERRE.
+   `gh issue edit {{issue_number}} --repo {{repo}} --add-label "crewflow:blocked" --remove-label "crewflow:running"`
 7. Abra PR com 'Closes #{{issue_number}}' e troque a label para `crewflow:review` REMOVENDO `crewflow:dev`. Após abrir o PR, ATUALIZE o título da sessão adicionando o número do PR: `{{repo_short}} #{{issue_number}} #<N-PR>: {{issue_title}}`. **NUNCA mergeie. NUNCA faça deploy.** Ambos são ações humanas manuais.
    Use SEMPRE a forma atômica que remove todos os estados anteriores:
    `gh issue edit {{issue_number}} --repo {{repo}} --add-label "crewflow:review" --remove-label "crewflow:dev,crewflow:todo,crewflow:running"`

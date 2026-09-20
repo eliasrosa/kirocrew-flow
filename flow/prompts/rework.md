@@ -37,7 +37,15 @@ Execute UMA vez, do início ao fim, e PARE:
    `cd {{dev_root}}/{{repo_short}} && git fetch origin && git worktree add {{worktree_path}} feat/issue-{{issue_number}}`
    Trabalhe DENTRO do worktree; NUNCA toque em outros worktrees.
 4. Implemente as correções solicitadas pelo reviewer.
-5. Valide localmente (build/testes). Se falhar e não conseguir corrigir, pare em `crewflow:blocked`.
+5. VALIDAÇÃO OBRIGATÓRIA E BLOQUEANTE — rode os MESMOS checks do CI DENTRO do worktree, ANTES do push. Só prossiga para o passo 6 se TODOS passarem (verde). Para o kirocrew-flow:
+   ```bash
+   python3 -m ruff check flow/
+   python3 -m mypy flow/ --ignore-missing-imports
+   python3 -m pytest flow/tests/ --cov=flow --cov-fail-under=75
+   ```
+   Se o repo alvo NÃO for o kirocrew-flow, use os comandos de lint/type-check/test daquele projeto — descubra via `README.md`, `Makefile`/`Makefile.*`, `pyproject.toml`/`package.json`/`.github/workflows/*.yml`. NÃO presuma; se não houver checks definidos, rode ao menos o build/test padrão do projeto.
+   Se QUALQUER check falhar e você não conseguir corrigir dentro deste one-shot: NÃO faça commit/push (não atualize a PR), marque `crewflow:blocked`, comente o erro na PR e ENCERRE.
+   `gh issue edit {{issue_number}} --repo {{repo}} --add-label "crewflow:blocked" --remove-label "crewflow:running"`
 6. Faça commit e push na branch existente:
    `git add -A && git commit -m "fix: aplicar pedidos de mudança do reviewer (iteração {{iteration}})" && git push origin feat/issue-{{issue_number}}`
    Isso remove automaticamente `crewflow:reviewed` (novo SHA invalida o lock anti-loop).
