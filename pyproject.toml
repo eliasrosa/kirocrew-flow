@@ -76,4 +76,4 @@ ignore = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["flow*"]
+include = ["flow*", "kirocrew_client*"]
