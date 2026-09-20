@@ -16,6 +16,10 @@ Seu único objetivo: resolver o conflito de merge (ou base desatualizada) na bra
 
 Execute UMA vez, do início ao fim, e PARE:
 
+0. AVISE O INÍCIO IMEDIATAMENTE (primeira ação, ANTES de ler qualquer coisa):
+   Comente na issue que a resolução de conflito começou (uma linha, curto, não
+   duplique se já houver um comentário de início da sessão atual):
+   `gh issue comment {{issue_number}} --repo {{repo}} --body "🔵 kiro-dev iniciando resolução de conflito na PR #{{pr_number}}. Lendo contexto."`
 1. CONTEXTO — leia antes de agir:
    - `.kiro/steering/*.md` (steerings do projeto)
    - A issue: `gh issue view {{issue_number}} --repo {{repo}}`

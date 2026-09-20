@@ -16,6 +16,10 @@ Seu único objetivo: aplicar os pedidos de mudança do reviewer na PR existente 
 
 Execute UMA vez, do início ao fim, e PARE:
 
+0. AVISE O INÍCIO IMEDIATAMENTE (primeira ação, ANTES de ler qualquer coisa):
+   Comente na issue que o rework começou (uma linha, curto, não duplique se já
+   houver um comentário de início da sessão atual):
+   `gh issue comment {{issue_number}} --repo {{repo}} --body "🔵 kiro-dev iniciando rework (iteração {{iteration}}). Lendo pedidos do reviewer."`
 1. CONTEXTO — leia tudo antes de agir:
    - `.kiro/steering/*.md` (steerings do projeto)
    - A issue e seus comentários:
