@@ -1,0 +1,27 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Establish and confirm a green baseline for the existing project on Python 3.12 before making changes. This documents the environment (python3.12 must be used, not the system python3=3.9) and records the one known pre-existing environmental test failure so later verification can distinguish new breakage from it.",
+  "status": "completed",
+  "steps": [
+    "Confirm the correct interpreter: run `python3.12 --version` (must be 3.12.x). The pyenv shim is at /root/.pyenv/shims/python3.12. The system `python3` is 3.9 and cannot parse this codebase — never use it.",
+    "Ensure dev deps are installed: `python3.12 -m pip install -e '.[dev]'` from the repo root /projects/sandbox/kirocrew-flow.",
+    "Run lint: `python3.12 -m ruff check flow/ backend/` and confirm it passes (should be clean at baseline).",
+    "Run type check: `python3.12 -m mypy flow/ --ignore-missing-imports` and confirm success. Also run `python3.12 -m mypy backend/ --ignore-missing-imports` to record the backend baseline.",
+    "Run the full test suite: `python3.12 -m pytest flow/tests/ --cov=flow --cov-report=term-missing --cov-fail-under=75`. Expect 658 passed, 1 skipped, and exactly 1 pre-existing failure: flow/tests/test_prompts_loader.py::TestRenderPromptFallback::test_template_corrompido_ilegivel_usa_fallback (fails only because the sandbox runs as root and chmod(0o000) does not block root reads). Confirm this is the ONLY failure.",
+    "Record the exact pass/fail counts and coverage percentage in this feature's findings so later features can detect regressions."
+  ],
+  "acceptance_criteria": [
+    "`python3.12 -m ruff check flow/ backend/` exits 0",
+    "`python3.12 -m mypy flow/ --ignore-missing-imports` reports success",
+    "`python3.12 -m pytest flow/tests/` shows only the one documented pre-existing failure (test_template_corrompido_ilegivel_usa_fallback) and coverage >= 75%",
+    "findings field records baseline counts and coverage"
+  ],
+  "verification": [
+    "python3.12 -m ruff check flow/ backend/",
+    "python3.12 -m mypy flow/ --ignore-missing-imports",
+    "python3.12 -m pytest flow/tests/ --cov=flow --cov-report=term-missing --cov-fail-under=75"
+  ],
+  "blocked_reason": null,
+  "findings": "Baseline confirmed green on python3.12 (Python 3.12.13, shim /root/.pyenv/shims/python3.12) at commit c4eae81. No source code changed. Results: (1) `python3.12 -m ruff check flow/ backend/` -> 'All checks passed!' exit 0. (2) `python3.12 -m mypy flow/ --ignore-missing-imports` -> 'Success: no issues found in 52 source files' exit 0. (3) `python3.12 -m pytest flow/tests/ --cov=flow --cov-report=term-missing --cov-fail-under=75` -> 658 passed, 1 skipped, 1 failed; TOTAL coverage 86.03% (>=75, gate satisfied). The ONLY failure is the documented pre-existing environmental one: flow/tests/test_prompts_loader.py::TestRenderPromptFallback::test_template_corrompido_ilegivel_usa_fallback (chmod(0o000) does not block reads as root). This is NOT to be fixed and is the regression baseline: any additional failure in later features is new breakage. BACKEND MYPY BASELINE NOTE: `python3.12 -m mypy backend/ --ignore-missing-imports` currently exits 2 with 'Source file found twice under different module names: server and backend.server' because backend/ has no __init__.py. Acceptance criteria only require mypy on flow/, so this is recorded as a known backend baseline, not a failure introduced here; later backend work may need --explicit-package-bases or an __init__.py to type-check backend/. System python3 is 3.9.25 and cannot parse this codebase (StrEnum, X|None) -> always use python3.12."
+}
