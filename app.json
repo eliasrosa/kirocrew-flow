@@ -11,11 +11,7 @@
     "agents/crewflow-merge.json"
   ],
   "backend": {
-    "hooks": {
-      "routes":      "backend.routes:register_routes",
-      "on_startup":  "backend.hooks:on_startup",
-      "on_shutdown": "backend.hooks:on_shutdown"
-    }
+    "routes": "backend.routes:register_routes"
   },
   "crons": [
     {"name": "crewflow-dev",      "every": 300, "message": "crewflow: trigger dev stage",      "enabled": false},

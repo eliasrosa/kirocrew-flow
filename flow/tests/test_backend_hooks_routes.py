@@ -1,12 +1,13 @@
-"""Testes de unidade para backend.routes e backend.hooks.
+"""Testes de unidade para backend.routes (Fase 3, assinatura corrigida).
 
-Critérios de aceite (issue #155):
-- register_routes registra as 3 rotas esperadas via duck-typing
+Critérios de aceite (issue #155, iteração 1):
+- register_routes(app) usa app.router.add_get/add_post (não duck-typing)
+- register_routes registra on_startup e on_cleanup no app
 - handle_health retorna {"ok": true, "app": "kirocrew-flow", "version": "1.0.0"}
 - handle_issues retorna {"issues": [], "note": "TODO Fase 4"}
 - handle_dispatch retorna {"ok": true, "note": "TODO Fase 4"}
-- on_startup cria 4 tasks asyncio e imprime log
-- on_shutdown cancela tasks e limpa a lista
+- _start_loops cria 4 tasks asyncio e imprime log
+- _stop_loops cancela tasks e limpa a lista
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from aiohttp import web
 
 # Garante que o raiz do repo está no path para importar backend/
 _REPO_ROOT = str(Path(__file__).parent.parent.parent)
@@ -24,6 +26,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from backend.routes import (  # noqa: E402
+    _start_loops,
+    _stop_loops,
     handle_dispatch,
     handle_health,
     handle_issues,
@@ -41,57 +45,59 @@ def _make_request() -> mock.MagicMock:
 
 
 def _parse_body(response: object) -> dict:  # type: ignore[type-arg]
-    """Lê o body de um web.Response como dict, aceitando bytes ou str."""
+    """Lê o body de um web.Response como dict."""
     raw = getattr(response, "body", None)
     if isinstance(raw, (bytes, bytearray)):
         return json.loads(raw)  # type: ignore[arg-type]
     return json.loads(str(raw))
 
 
-class _FakeRegistry:
-    """Implementação mínima de duck-typing para RouteRegistry do gateway."""
-
-    def __init__(self) -> None:
-        self.routes: list[tuple[str, str, object]] = []
-
-    def add_route(self, method: str, path: str, handler: object) -> None:
-        self.routes.append((method, path, handler))
-
-
 # ---------------------------------------------------------------------------
-# Tests: register_routes
+# Tests: register_routes — usa web.Application real
 # ---------------------------------------------------------------------------
 
 
 class TestRegisterRoutes:
-    def test_registers_three_routes(self) -> None:
-        registry = _FakeRegistry()
-        register_routes(registry)
-        assert len(registry.routes) == 3
+    @staticmethod
+    def _route_set(app: web.Application) -> set[tuple[str, str]]:
+        result = set()
+        for r in app.router.routes():
+            resource = r.resource
+            if resource is not None:
+                result.add((r.method, resource.canonical))
+        return result
 
-    def test_health_route_registered(self) -> None:
-        registry = _FakeRegistry()
-        register_routes(registry)
-        methods_paths = [(m, p) for m, p, _ in registry.routes]
-        assert ("GET", "/apps/kirocrew-flow/api/health") in methods_paths
+    def test_registers_health_route(self) -> None:
+        app = web.Application()
+        register_routes(app)
+        assert ("GET", "/api/apps/kirocrew-flow/health") in self._route_set(app)
 
-    def test_issues_route_registered(self) -> None:
-        registry = _FakeRegistry()
-        register_routes(registry)
-        methods_paths = [(m, p) for m, p, _ in registry.routes]
-        assert ("GET", "/apps/kirocrew-flow/api/issues") in methods_paths
+    def test_registers_issues_route(self) -> None:
+        app = web.Application()
+        register_routes(app)
+        assert ("GET", "/api/apps/kirocrew-flow/issues") in self._route_set(app)
 
-    def test_dispatch_route_registered(self) -> None:
-        registry = _FakeRegistry()
-        register_routes(registry)
-        methods_paths = [(m, p) for m, p, _ in registry.routes]
-        assert ("POST", "/apps/kirocrew-flow/api/dispatch") in methods_paths
+    def test_registers_dispatch_route(self) -> None:
+        app = web.Application()
+        register_routes(app)
+        assert ("POST", "/api/apps/kirocrew-flow/dispatch") in self._route_set(app)
 
-    def test_handlers_are_callable(self) -> None:
-        registry = _FakeRegistry()
-        register_routes(registry)
-        for _, _, handler in registry.routes:
-            assert callable(handler)
+    def test_appends_on_startup_hook(self) -> None:
+        app = web.Application()
+        register_routes(app)
+        assert _start_loops in app.on_startup
+
+    def test_appends_on_cleanup_hook(self) -> None:
+        app = web.Application()
+        register_routes(app)
+        assert _stop_loops in app.on_cleanup
+
+    def test_three_explicit_routes(self) -> None:
+        """aiohttp add_get registra HEAD automaticamente — contar só GET e POST."""
+        app = web.Application()
+        register_routes(app)
+        explicit = {r.method for r in app.router.routes() if r.method in ("GET", "POST")}
+        assert explicit == {"GET", "POST"}
 
 
 # ---------------------------------------------------------------------------
@@ -160,90 +166,83 @@ class TestHandleDispatch:
 
 
 # ---------------------------------------------------------------------------
-# Tests: hooks on_startup / on_shutdown
+# Tests: _start_loops
 # ---------------------------------------------------------------------------
 
 
-class TestHooksOnStartup:
-    def test_on_startup_creates_four_tasks(self, capsys: pytest.CaptureFixture) -> None:  # type: ignore[type-arg]
-        """on_startup deve criar 4 tasks asyncio e imprimir log de confirmação."""
-        import backend.hooks as hooks_module
+class TestStartLoops:
+    def test_creates_four_tasks(self, capsys: pytest.CaptureFixture) -> None:  # type: ignore[type-arg]
+        """_start_loops deve criar 4 tasks no app e imprimir log."""
+        app = web.Application()
 
-        # Reset state
-        hooks_module._LOOP_TASKS.clear()
-
-        with mock.patch("backend.hooks.asyncio.get_event_loop") as mock_get_loop:
-            fake_loop = mock.MagicMock()
+        with mock.patch("backend.routes.asyncio.create_task") as mock_create_task:
             fake_tasks = [mock.MagicMock() for _ in range(4)]
-            fake_loop.create_task.side_effect = fake_tasks
-            mock_get_loop.return_value = fake_loop
+            mock_create_task.side_effect = fake_tasks
 
-            # Patch os imports internos do on_startup
-            fake_run_stage_loop = mock.MagicMock()
-            with (
-                mock.patch.dict(
-                    "sys.modules",
-                    {
-                        "backend.server": mock.MagicMock(_run_stage_loop=fake_run_stage_loop),
-                        "deployment.deployment": mock.MagicMock(
-                            _STAGE_DEV="dev",
-                            _STAGE_REVIEWER="reviewer",
-                            _STAGE_MERGE="merge",
-                            _STAGE_CONFLITO="conflito",
-                        ),
-                    },
-                ),
+            with mock.patch.dict(
+                "sys.modules",
+                {
+                    "backend.server": mock.MagicMock(
+                        _run_stage_loop=mock.MagicMock(return_value=mock.MagicMock())
+                    ),
+                    "deployment.deployment": mock.MagicMock(
+                        _STAGE_DEV="dev",
+                        _STAGE_REVIEWER="reviewer",
+                        _STAGE_MERGE="merge",
+                        _STAGE_CONFLITO="conflito",
+                    ),
+                },
             ):
-                hooks_module.on_startup()
+                asyncio.get_event_loop().run_until_complete(_start_loops(app))
 
-        assert len(hooks_module._LOOP_TASKS) == 4
+        assert mock_create_task.call_count == 4
+        assert "crewflow_tasks" in app
+        assert len(app["crewflow_tasks"]) == 4
+
         captured = capsys.readouterr()
         assert "on_startup" in captured.out
         assert "4 loops asyncio iniciados" in captured.out
 
-        # Cleanup
-        hooks_module._LOOP_TASKS.clear()
+    def test_handles_import_error_gracefully(self, capsys: pytest.CaptureFixture) -> None:  # type: ignore[type-arg]
+        """_start_loops não deve propagar exceção se imports falharem."""
+        app = web.Application()
 
-    def test_on_startup_handles_import_error_gracefully(
-        self, capsys: pytest.CaptureFixture  # type: ignore[type-arg]
-    ) -> None:
-        """on_startup não deve propagar exceção se imports falharem."""
-        import backend.hooks as hooks_module
-
-        hooks_module._LOOP_TASKS.clear()
-
-        # Simula falha no import de backend.server
         with mock.patch.dict("sys.modules", {"backend.server": None}):  # type: ignore[dict-item]
-            hooks_module.on_startup()
+            asyncio.get_event_loop().run_until_complete(_start_loops(app))
 
         captured = capsys.readouterr()
-        # Deve ter caído no except e logado o erro
         assert "error" in captured.out.lower() or "on_startup" in captured.out
 
-        hooks_module._LOOP_TASKS.clear()
+
+# ---------------------------------------------------------------------------
+# Tests: _stop_loops
+# ---------------------------------------------------------------------------
 
 
-class TestHooksOnShutdown:
-    def test_on_shutdown_cancels_all_tasks(self, capsys: pytest.CaptureFixture) -> None:  # type: ignore[type-arg]
-        """on_shutdown deve cancelar todas as tasks e limpar a lista."""
-        import backend.hooks as hooks_module
-
+class TestStopLoops:
+    def test_cancels_all_tasks(self, capsys: pytest.CaptureFixture) -> None:  # type: ignore[type-arg]
+        """_stop_loops deve cancelar todas as tasks e limpar a lista."""
+        app = web.Application()
         fake_tasks = [mock.MagicMock() for _ in range(4)]
-        hooks_module._LOOP_TASKS.extend(fake_tasks)
+        app["crewflow_tasks"] = fake_tasks
 
-        hooks_module.on_shutdown()
+        asyncio.get_event_loop().run_until_complete(_stop_loops(app))
 
         for task in fake_tasks:
             task.cancel.assert_called_once()
 
-        assert hooks_module._LOOP_TASKS == []
+        assert app["crewflow_tasks"] == []
 
         captured = capsys.readouterr()
-        assert "on_shutdown" in captured.out
+        assert "on_cleanup" in captured.out
 
-    def test_on_shutdown_with_empty_list_does_not_raise(self) -> None:
-        """on_shutdown com lista vazia não deve lançar exceção."""
-        import backend.hooks as hooks_module
+    def test_no_tasks_key_does_not_raise(self) -> None:
+        """_stop_loops sem chave crewflow_tasks não deve lançar exceção."""
+        app = web.Application()
+        asyncio.get_event_loop().run_until_complete(_stop_loops(app))
 
-        hooks_module._LOOP_TASKS.clear()
-        hooks_module.on_shutdown()  # não deve lançar
+    def test_empty_task_list_does_not_raise(self) -> None:
+        """_stop_loops com lista vazia não deve lançar exceção."""
+        app = web.Application()
+        app["crewflow_tasks"] = []
+        asyncio.get_event_loop().run_until_complete(_stop_loops(app))
