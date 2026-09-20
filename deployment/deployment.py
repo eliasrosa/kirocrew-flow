@@ -261,47 +261,66 @@ _DISPATCH_BACKSTOP_SECS = 120  # 2 minutos: tempo mínimo para o label aparecer 
 
 
 def _try_acquire_dispatch_lock(repo: str, issue_number: int) -> tuple[bool, str]:
-    """Tenta adquirir o backstop lock de forma atômica (O_CREAT|O_EXCL).
+    """Tenta adquirir o backstop lock de forma puramente atômica (O_CREAT|O_EXCL).
 
-    Cria o arquivo de lock ANTES do POST /api/chat.  Se o arquivo já existe e
-    ainda está dentro do período de backstop (_DISPATCH_BACKSTOP_SECS), a
-    aquisição falha — sinal de que outro ciclo já fez o dispatch desta issue.
+    Cria o arquivo de lock ANTES do POST /api/chat. NÃO há verificação prévia de
+    existência (``os.path.exists``): confiar no pre-check reabriria uma janela
+    TOCTOU em que dois threads passam o check e ambos prosseguem. O único caminho
+    para retornar True é um ``os.open`` com O_CREAT|O_EXCL bem-sucedido — atômico
+    no kernel, então dois processos concorrentes nunca obtêm True ao mesmo tempo
+    para o mesmo arquivo.
+
+    Se o open atômico levanta ``FileExistsError``, o lock já existe. Só então a
+    staleness é avaliada: se ainda válido (dentro de _DISPATCH_BACKSTOP_SECS),
+    falha (outro ciclo já despachou esta issue); se stale (expirado), remove o
+    arquivo e re-tenta o open atômico EXATAMENTE UMA vez — se colidir de novo,
+    outro processo ganhou o reclaim e a aquisição falha.
 
     Returns:
         (True, lock_path)  — lock adquirido; caller deve prosseguir com o dispatch.
-        (False, lock_path) — lock já existia e ainda está válido; dispatch abortado.
+        (False, lock_path) — lock já existia e ainda válido, ou o reclaim de um
+                             lock stale colidiu; dispatch abortado.
 
-    A criação com O_CREAT|O_EXCL é atômica no kernel: dois processos concorrentes
-    nunca obtêm True ao mesmo tempo para o mesmo arquivo.
+    Continua sendo apenas um backstop curto (2 min) anti-duplo-dispatch, não o
+    mecanismo primário de concorrência (esse é _issue_has_active_session).
     """
+    import contextlib
+
     short = repo.split("/")[-1]
     lock_path = os.path.join(
         _sessdir(), f"dashboard_esteira-{short}-{issue_number}.jsonl.lock"
     )
 
-    # Lock pré-existente ainda válido → outro dispatch ganhou a corrida
-    if os.path.exists(lock_path) and not _lock_is_stale(lock_path):
-        return False, lock_path
-
-    # Lock stale (expirado): remove para liberar o nome antes da criação atômica.
-    # Perda de atomicidade aqui é aceitável: dois processos concorrentes neste
-    # caminho só chegam depois que o backstop de 2min expirou — cenário normal
-    # de reboot/crash, não de dispatch duplicado.
-    if os.path.exists(lock_path):
-        import contextlib
-        with contextlib.suppress(OSError):
-            os.remove(lock_path)  # outro processo pode ter removido concorrentemente
+    def _create() -> bool:
+        """Cria o lock atomicamente. True em sucesso, False se já existe."""
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False
 
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        os.close(fd)
-        return True, lock_path
-    except FileExistsError:
-        # Race: outro processo criou o arquivo entre o exists() e o open()
-        return False, lock_path
+        # Primeira tentativa: só O_EXCL, sem pré-check de existência.
+        if _create():
+            return True, lock_path
+
+        # Colidiu: o lock já existe. Só agora avaliamos staleness.
+        if not _lock_is_stale(lock_path):
+            # Lock ainda válido → outro dispatch ganhou a corrida.
+            return False, lock_path
+
+        # Lock stale (expirado): remove e re-tenta o open atômico UMA vez.
+        # Tolera unlink concorrente (outro processo pode já ter removido).
+        with contextlib.suppress(OSError):
+            os.unlink(lock_path)
+
+        # Re-tentativa única: se colidir de novo, outro processo ganhou o reclaim.
+        return _create(), lock_path
     except OSError:
-        # Diretório não existe ou erro inesperado: fail-open para não bloquear
-        # dispatch legítimo por problema de filesystem.
+        # Diretório não existe ou erro inesperado (NÃO FileExistsError, que é
+        # tratado acima): fail-open para não bloquear dispatch legítimo por
+        # problema de filesystem.
         logger.warning(
             "deployment: não foi possível criar lock atômico para %s#%s — "
             "prosseguindo sem backstop (diretório de sessões inacessível?)",

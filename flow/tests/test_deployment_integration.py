@@ -634,29 +634,47 @@ class TestTryAcquireDispatchLock:
     def test_race_dois_dispatches_mesma_issue_apenas_um_passa(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Dois chamadores concorrentes: apenas o primeiro adquire o lock."""
+        """Dois chamadores concorrentes: apenas o primeiro adquire o lock.
+
+        Determinístico: um threading.Barrier(2) sincroniza o início dos dois
+        threads para maximizar a sobreposição na chamada de
+        _try_acquire_dispatch_lock, um threading.Lock protege os appends em
+        `resultados`, e o cenário roda 50+ iterações. Cada iteração usa um
+        número de issue distinto para que um lock remanescente de uma iteração
+        anterior não force o segundo thread a sempre falhar. Se a janela TOCTOU
+        reaparecesse, alguma iteração produziria 2 True e o teste falharia.
+        """
         import threading
 
         from deployment.deployment import _try_acquire_dispatch_lock
 
         monkeypatch.setattr("deployment.deployment._sessdir", lambda: str(tmp_path))
 
-        resultados: list[bool] = []
+        for issue_number in range(1000, 1060):  # 60 iterações, issue distinta cada
+            barrier = threading.Barrier(2)
+            resultados_lock = threading.Lock()
+            resultados: list[bool] = []
 
-        def dispatch_attempt() -> None:
-            acquired, _ = _try_acquire_dispatch_lock("owner/myrepo", 99)
-            resultados.append(acquired)
+            def dispatch_attempt(num: int = issue_number) -> None:
+                barrier.wait()  # sincroniza início para sobreposição máxima
+                acquired, _ = _try_acquire_dispatch_lock("owner/myrepo", num)
+                with resultados_lock:
+                    resultados.append(acquired)
 
-        t1 = threading.Thread(target=dispatch_attempt)
-        t2 = threading.Thread(target=dispatch_attempt)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+            t1 = threading.Thread(target=dispatch_attempt)
+            t2 = threading.Thread(target=dispatch_attempt)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
 
-        # Exatamente 1 deve ter adquirido o lock
-        assert resultados.count(True) == 1
-        assert resultados.count(False) == 1
+            # Exatamente 1 deve ter adquirido o lock nesta iteração
+            assert resultados.count(True) == 1, (
+                f"issue {issue_number}: esperava 1 True, obteve {resultados}"
+            )
+            assert resultados.count(False) == 1, (
+                f"issue {issue_number}: esperava 1 False, obteve {resultados}"
+            )
 
     def test_nomes_de_repo_diferentes_nao_conflitam(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
