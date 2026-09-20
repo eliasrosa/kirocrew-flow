@@ -141,7 +141,9 @@ class TestHandleIssues:
     """
 
     def test_returns_columns_key(self) -> None:
-        fake_columns = {key: [] for key in _COLUMN_KEYS}
+        fake_columns: dict[str, list[dict[str, object]]] = {
+            key: [] for key in _COLUMN_KEYS
+        }
         with mock.patch(
             "backend.routes.issues_mod.collect_columns", return_value=fake_columns
         ):
@@ -159,7 +161,9 @@ class TestHandleIssues:
             "url": "https://github.com/owner/repo/issues/7",
             "age_min": 0,
         }
-        fake_columns = {key: [] for key in _COLUMN_KEYS}
+        fake_columns: dict[str, list[dict[str, object]]] = {
+            key: [] for key in _COLUMN_KEYS
+        }
         fake_columns["dev"] = [card]
         with mock.patch(
             "backend.routes.issues_mod.collect_columns", return_value=fake_columns
