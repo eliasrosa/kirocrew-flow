@@ -158,8 +158,11 @@ class TestEnsureTodo:
 
 class TestRunDevStage:
     def test_invokes_run_stage_with_dev_constant(self) -> None:
-        with mock.patch.object(dispatch_mod, "_run_stage") as run_m:
-            dispatch_mod.run_dev_stage()
+        with mock.patch.object(
+            dispatch_mod, "_load_config",
+            return_value={"repos": ["owner/repo"], "auto_dispatch": True},
+        ), mock.patch.object(dispatch_mod, "_run_stage") as run_m:
+            dispatch_mod.run_dev_stage("owner/repo")
 
         run_m.assert_called_once()
         args = run_m.call_args[0]
@@ -169,8 +172,70 @@ class TestRunDevStage:
     def test_ctx_is_backend_cron_ctx(self) -> None:
         from backend.ctx import BackendCronCtx
 
-        with mock.patch.object(dispatch_mod, "_run_stage") as run_m:
-            dispatch_mod.run_dev_stage()
+        with mock.patch.object(
+            dispatch_mod, "_load_config",
+            return_value={"repos": ["owner/repo"], "auto_dispatch": True},
+        ), mock.patch.object(dispatch_mod, "_run_stage") as run_m:
+            dispatch_mod.run_dev_stage("owner/repo")
 
         ctx = run_m.call_args[0][0]
         assert isinstance(ctx, BackendCronCtx)
+
+    def test_dispatched_when_auto_dispatch_and_repo_configured(self) -> None:
+        """auto_dispatch=true + repo na config → DISPATCHED (sucesso genuíno)."""
+        with mock.patch.object(
+            dispatch_mod, "_load_config",
+            return_value={"repos": ["owner/repo"], "auto_dispatch": True},
+        ), mock.patch.object(dispatch_mod, "_run_stage") as run_m:
+            outcome = dispatch_mod.run_dev_stage("owner/repo")
+
+        assert outcome is dispatch_mod.DispatchOutcome.DISPATCHED
+        run_m.assert_called_once()
+
+    def test_auto_dispatch_off_reports_honestly(self) -> None:
+        """auto_dispatch=false: a varredura roda mas nada é despachado."""
+        with mock.patch.object(
+            dispatch_mod, "_load_config",
+            return_value={"repos": ["owner/repo"], "auto_dispatch": False},
+        ), mock.patch.object(dispatch_mod, "_run_stage") as run_m:
+            outcome = dispatch_mod.run_dev_stage("owner/repo")
+
+        assert outcome is dispatch_mod.DispatchOutcome.AUTO_DISPATCH_OFF
+        # A varredura ainda roda pelo caminho do cron (modo aviso).
+        run_m.assert_called_once()
+
+    def test_repo_not_configured_skips_run_stage(self) -> None:
+        """Repo fora de 'repos' da config: não roda a varredura e reporta o motivo."""
+        with mock.patch.object(
+            dispatch_mod, "_load_config",
+            return_value={"repos": ["other/service"], "auto_dispatch": True},
+        ), mock.patch.object(dispatch_mod, "_run_stage") as run_m:
+            outcome = dispatch_mod.run_dev_stage("owner/repo")
+
+        assert outcome is dispatch_mod.DispatchOutcome.REPO_NOT_CONFIGURED
+        run_m.assert_not_called()
+
+    def test_repo_matched_by_short_name(self) -> None:
+        """A config pode listar só o sufixo 'repo' — casa mesmo assim."""
+        with mock.patch.object(
+            dispatch_mod, "_load_config",
+            return_value={"repos": ["repo"], "auto_dispatch": True},
+        ), mock.patch.object(dispatch_mod, "_run_stage") as run_m:
+            outcome = dispatch_mod.run_dev_stage("owner/repo")
+
+        assert outcome is dispatch_mod.DispatchOutcome.DISPATCHED
+        run_m.assert_called_once()
+
+    def test_no_config_reports_no_config(self) -> None:
+        """Sem config do deployment: nada roda, DispatchOutcome.NO_CONFIG."""
+        with mock.patch.object(
+            dispatch_mod, "_load_config", side_effect=RuntimeError("sem config")
+        ), mock.patch.object(dispatch_mod, "_run_stage") as run_m:
+            outcome = dispatch_mod.run_dev_stage("owner/repo")
+
+        assert outcome is dispatch_mod.DispatchOutcome.NO_CONFIG
+        run_m.assert_not_called()
+
+    def test_every_outcome_has_detail(self) -> None:
+        for outcome in dispatch_mod.DispatchOutcome:
+            assert dispatch_mod.outcome_detail(outcome)

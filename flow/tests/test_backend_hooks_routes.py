@@ -205,19 +205,63 @@ def _make_json_request(payload: object, raise_on_json: bool = False) -> mock.Mag
 
 
 class TestHandleDispatch:
-    def test_valid_body_returns_dispatched(self) -> None:
+    def test_valid_body_dispatched_true_on_genuine_dispatch(self) -> None:
+        """Só reporta dispatched:true quando a varredura dev de fato disparou."""
+        from backend.dispatch import DispatchOutcome
+
         request = _make_json_request({"repo": "owner/repo", "number": 42})
         with mock.patch(
             "backend.routes.dispatch_mod.ensure_todo"
         ) as ensure_m, mock.patch(
-            "backend.routes.dispatch_mod.run_dev_stage"
+            "backend.routes.dispatch_mod.run_dev_stage",
+            return_value=DispatchOutcome.DISPATCHED,
         ) as run_m:
             loop = asyncio.get_event_loop()
             response = loop.run_until_complete(handle_dispatch(request))
         body = _parse_body(response)
-        assert body == {"ok": True, "dispatched": True}
+        assert body["ok"] is True
+        assert body["dispatched"] is True
+        assert body["outcome"] == "dispatched"
+        assert "detail" in body
         ensure_m.assert_called_once_with("owner/repo", 42)
-        run_m.assert_called_once_with()
+        run_m.assert_called_once_with("owner/repo")
+
+    def test_dispatched_false_when_auto_dispatch_off(self) -> None:
+        """auto_dispatch=false: ok:true mas dispatched:false, com detail honesto."""
+        from backend.dispatch import DispatchOutcome
+
+        request = _make_json_request({"repo": "owner/repo", "number": 42})
+        with mock.patch(
+            "backend.routes.dispatch_mod.ensure_todo"
+        ), mock.patch(
+            "backend.routes.dispatch_mod.run_dev_stage",
+            return_value=DispatchOutcome.AUTO_DISPATCH_OFF,
+        ):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_dispatch(request))
+        body = _parse_body(response)
+        assert body["ok"] is True
+        assert body["dispatched"] is False
+        assert body["outcome"] == "auto_dispatch_disabled"
+        assert "auto_dispatch" in body["detail"]
+
+    def test_dispatched_false_when_repo_not_configured(self) -> None:
+        """Repo fora da config do deployment: dispatched:false com motivo."""
+        from backend.dispatch import DispatchOutcome
+
+        request = _make_json_request({"repo": "owner/repo", "number": 42})
+        with mock.patch(
+            "backend.routes.dispatch_mod.ensure_todo"
+        ), mock.patch(
+            "backend.routes.dispatch_mod.run_dev_stage",
+            return_value=DispatchOutcome.REPO_NOT_CONFIGURED,
+        ):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_dispatch(request))
+        body = _parse_body(response)
+        assert body["ok"] is True
+        assert body["dispatched"] is False
+        assert body["outcome"] == "repo_not_configured"
 
     def test_invalid_json_returns_400(self) -> None:
         request = _make_json_request(None, raise_on_json=True)

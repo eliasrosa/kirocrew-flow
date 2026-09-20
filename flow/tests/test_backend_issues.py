@@ -190,9 +190,52 @@ class TestCollectColumnsCardShape:
         assert card["repo"] == "owner/repo"
         assert card["url"] == "https://github.com/owner/repo/issues/9"
 
-    def test_age_min_degrades_to_zero_without_network(self, tmp_path: Path) -> None:
-        cols = _collect([_item(9, ["crewflow:dev"])], tmp_path)
-        assert cols["dev"][0]["age_min"] == 0
+    def test_age_min_is_none_when_unknown(self, tmp_path: Path) -> None:
+        """Sem running_since e sem gh, age_min é None (desconhecido), não 0.
+
+        Distingue "idade desconhecida" de "idade zero" — a UI renderiza '—'
+        para None e '0m' só para uma issue de fato recém-criada (issue #4).
+        """
+        provider = _FakeProvider([_item(9, ["crewflow:dev"])])
+        with mock.patch.object(
+            issues_mod, "load_squads", return_value=[_fake_squad()]
+        ), mock.patch.object(
+            issues_mod, "provider_for", return_value=provider
+        ), mock.patch.object(
+            issues_mod.scan_cache, "open_cache",
+            return_value=__import__("sqlite3").connect(str(tmp_path / "cache.db")),
+        ), mock.patch.object(
+            issues_mod, "_age_min_from_gh", return_value=None
+        ), mock.patch.object(
+            issues_mod.scan_cache, "get_running_since", return_value=None
+        ), mock.patch.object(
+            issues_mod.scan_cache, "set_hash"
+        ):
+            cols = issues_mod.collect_columns()
+        assert cols["dev"][0]["age_min"] is None
+
+    def test_age_min_from_running_since(self, tmp_path: Path) -> None:
+        """Quando o cache tem running_since, age_min vem dele (zero-token)."""
+        from datetime import UTC, datetime, timedelta
+
+        two_hours_ago = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        provider = _FakeProvider([_item(9, ["crewflow:dev"])])
+        with mock.patch.object(
+            issues_mod, "load_squads", return_value=[_fake_squad()]
+        ), mock.patch.object(
+            issues_mod, "provider_for", return_value=provider
+        ), mock.patch.object(
+            issues_mod.scan_cache, "open_cache",
+            return_value=__import__("sqlite3").connect(str(tmp_path / "cache.db")),
+        ), mock.patch.object(
+            issues_mod, "_age_min_from_gh", return_value=None
+        ), mock.patch.object(
+            issues_mod.scan_cache, "get_running_since", return_value=two_hours_ago
+        ), mock.patch.object(
+            issues_mod.scan_cache, "set_hash"
+        ):
+            cols = issues_mod.collect_columns()
+        assert cols["dev"][0]["age_min"] == 120
 
 
 class TestCollectColumnsEmpty:

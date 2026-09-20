@@ -135,7 +135,9 @@ async def handle_dispatch(request: web.Request) -> web.Response:
     try:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, dispatch_mod.ensure_todo, repo, number)
-        await loop.run_in_executor(None, dispatch_mod.run_dev_stage)
+        outcome = await loop.run_in_executor(
+            None, dispatch_mod.run_dev_stage, repo
+        )
     except ProviderError as exc:
         print(f"[kirocrew-flow] handle_dispatch provider error: {exc}", flush=True)
         return web.json_response({"ok": False, "error": str(exc)}, status=502)
@@ -143,4 +145,17 @@ async def handle_dispatch(request: web.Request) -> web.Response:
         print(f"[kirocrew-flow] handle_dispatch error: {exc}", flush=True)
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
-    return web.json_response({"ok": True, "dispatched": True})
+    # ``ok`` é True sempre que a orquestração rodou sem erro (a label todo foi
+    # aplicada). ``dispatched`` só é True no caso de sucesso genuíno — quando a
+    # varredura dev de fato disparou (auto_dispatch=true e repo configurado).
+    # Nos demais casos reportamos honestamente o motivo em ``detail`` em vez de
+    # mentir com dispatched:true (review iteração 2, issues #1/#3).
+    dispatched = outcome is dispatch_mod.DispatchOutcome.DISPATCHED
+    return web.json_response(
+        {
+            "ok": True,
+            "dispatched": dispatched,
+            "outcome": str(outcome),
+            "detail": dispatch_mod.outcome_detail(outcome),
+        }
+    )

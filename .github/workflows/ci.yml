@@ -40,6 +40,7 @@ jobs:
         run: |
           python -m pytest flow/tests/ \
             --cov=flow \
+            --cov=backend \
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-fail-under=75

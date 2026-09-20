@@ -35,7 +35,10 @@ python_functions = ["test_*"]
 addopts = "-v"
 
 [tool.coverage.run]
-source = ["flow"]
+# backend/ entra no gate de cobertura junto com flow/ (review iteração 2,
+# issue #5): o código novo da Fase 4 (backend/issues.py, backend/dispatch.py,
+# backend/routes.py) passa a contar para o piso de 75%.
+source = ["flow", "backend"]
 omit = ["flow/tests/*"]
 
 [tool.coverage.report]
