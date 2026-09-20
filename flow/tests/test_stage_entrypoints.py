@@ -300,6 +300,53 @@ class TestRunDevQaFail:
         kwargs = mock_dispatch.call_args.kwargs
         assert "layout quebrado" in kwargs.get("qa_fail_context", "")
 
+    def test_qa_fail_pulado_quando_sessao_dev_viva(self) -> None:
+        """qa-retry NÃO reprocessa quando já há sessão dev viva (worktree/lock)."""
+        ctx = _make_ctx()
+        result = self._qa_fail_result()
+        provider = mock.MagicMock()
+
+        with (
+            mock.patch("deployment.deployment._load_config", return_value=_base_config()),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for", return_value=provider),
+            mock.patch("deployment.deployment._active_sessions", return_value=0),
+            mock.patch("deployment.deployment._qa_retry_session_live", return_value=True),
+            mock.patch("deployment.deployment._process_qa_retry") as mock_proc,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            run_dev(ctx)
+
+        # Guard de sessão viva impede o re-dispatch (mesmo padrão do dispatch dev).
+        mock_proc.assert_not_called()
+
+    def test_qa_fail_pulado_quando_cota_cheia(self) -> None:
+        """qa-retry respeita a cota de concorrência (vagas) — adiado quando cheia."""
+        ctx = _make_ctx()
+        result = self._qa_fail_result()
+        provider = mock.MagicMock()
+
+        with (
+            # max_concurrent_tasks=1 e 1 sessão de backstop ativa → vagas = 1 - 1 = 0
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config(max_concurrent_tasks=1)),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for", return_value=provider),
+            mock.patch("deployment.deployment._active_sessions", return_value=1),
+            mock.patch("deployment.deployment._qa_retry_session_live", return_value=False),
+            mock.patch("deployment.deployment._process_qa_retry") as mock_proc,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            run_dev(ctx)
+
+        mock_proc.assert_not_called()
+
     def test_qa_fail_auto_false_apenas_notifica(self) -> None:
         """run_dev com auto_dispatch=false não transiciona — só notifica."""
         ctx = _make_ctx()

@@ -242,7 +242,11 @@ def decide(
         return ExecutorDecision(
             action=ActionKind.DISPATCH_QA_RETRY,
             reason="crewflow:qa-fail detectado — QA reprovou; devolvendo issue para crewflow:todo e re-despachando dev",
-            add_labels=("crewflow:todo",),
+            # crewflow:running é o lock anti-loop (espelha DISPATCH_REWORK): a issue
+            # volta para crewflow:todo + crewflow:running, evitando que o próximo
+            # ciclo do cron dev a trate como um DISPATCH_DEV normal antes de a
+            # sessão re-despachada deixar rastro. A sessão dev limpa running ao fim.
+            add_labels=("crewflow:todo", "crewflow:running"),
             remove_labels=("crewflow:qa-fail", "crewflow:qa"),
         )
 

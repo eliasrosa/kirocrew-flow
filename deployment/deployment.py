@@ -968,9 +968,8 @@ def _extract_qa_fail_reason(repo: str, issue_number: int, provider: object) -> s
     try:
         import re as _re
 
-        _prov = provider  # type: ignore[assignment]
-        raw = _prov.get_work_item(repo, str(issue_number))  # type: ignore[attr-defined]
-        # Nem todo provider expõe comentários no work_item; usa o gh client.
+        # A extração usa os comentários da issue via gh client; o work_item do
+        # provider não expõe comentários, então não há chamada extra aqui.
         from flow.adapters import github_client as _gh
         comments = _gh.get_issue_comments(repo, issue_number) if hasattr(_gh, "get_issue_comments") else []
         for comment in comments:
@@ -981,7 +980,6 @@ def _extract_qa_fail_reason(repo: str, issue_number: int, provider: object) -> s
                 after = _re.sub(r"<!--.*?-->", "", after, flags=_re.DOTALL).strip()
                 if after:
                     reason = after
-        _ = raw  # evita lint de variável não usada em versões sem comentários
     except Exception as exc:
         logger.debug(
             "deployment: não foi possível extrair motivo de qa-fail para %s#%s: %s",
@@ -1006,6 +1004,26 @@ def _qa_fail_prompt_context(reason: str) -> str:
         "garanta que a correção cobre exatamente o que foi reprovado. Uma nova PR "
         "será aberta para a correção.\n"
     )
+
+
+def _qa_retry_session_live(repo: str, issue_number: int, dev_root: str) -> bool:
+    """True se há uma sessão de dev viva para a issue (worktree ou backstop lock).
+
+    Guard anti-duplo-dispatch específico do fluxo qa-retry. Diferente de
+    ``_issue_has_active_session``, NÃO considera "PR aberta" como sessão viva:
+    no fluxo qa-fail a PR reprovada está sempre aberta (é fechada por
+    ``_process_qa_retry``), então esse sinal seria um falso positivo. Os sinais
+    confiáveis de uma sessão de dev em andamento são o worktree efêmero e o
+    backstop lock de dispatch recente.
+    """
+    wt_path = _worktree_path(dev_root, repo, issue_number)
+    if os.path.exists(wt_path):
+        return True
+    short = repo.split("/")[-1]
+    locks = glob.glob(
+        os.path.join(_sessdir(), f"dashboard_esteira-{short}-{issue_number}.jsonl.lock")
+    )
+    return any(not _lock_is_stale(p) for p in locks)
 
 
 def _process_qa_retry(
@@ -1039,6 +1057,7 @@ def _process_qa_retry(
     new_labels = _apply_state_transition(
         current_labels,
         State.TODO,
+        add_modifiers=("crewflow:running",),
         remove_modifiers=("crewflow:qa-fail", "crewflow:qa"),
     )
     _prov.set_labels(repo, str(issue_number), new_labels)  # type: ignore[attr-defined]
@@ -1101,7 +1120,12 @@ def _process_qa_retry(
             repo, issue_number, exc,
         )
 
-    # 5. Re-despacha a sessão de dev com o contexto da reprovação
+    # 5. Re-despacha a sessão de dev com o contexto da reprovação.
+    # Remove o worktree órfão da tentativa anterior antes do novo dispatch: o
+    # fluxo de reprovação reusa a branch feat/issue-N, então um worktree deixado
+    # pela PR fechada faria a nova sessão dev começar sujo (mesmo guard aplicado
+    # ao dispatch dev normal em _run_stage).
+    _clean_stale_worktree(dev_root, repo, issue_number)
     prompt_extra = squad.dispatch_prompt_extra if squad else ""  # type: ignore[attr-defined]
     qa_fail_context = _qa_fail_prompt_context(reason)
     _dispatch(ctx, repo, issue, cfg, prompt_extra=prompt_extra, qa_fail_context=qa_fail_context)
@@ -3334,7 +3358,14 @@ def _run_stage(ctx: object, stage: str) -> None:
         _conn_stage_disp.close()
 
         # ── QA reprovou (crewflow:qa-fail): volta a issue para todo + re-dispatch dev ──
+        # O re-dispatch de qa-retry compartilha os MESMOS guards do dispatch dev
+        # normal (loop acima): a mesma cota de concorrência (`vagas`),
+        # _issue_has_active_session (não redespachar sobre sessão viva),
+        # _resource_headroom_ok (não despachar sob pressão de recursos) e
+        # _clean_stale_worktree (feito dentro de _process_qa_retry, pois a branch
+        # feat/issue-N é reusada). Sem isso o re-dispatch furava a fila.
         qa_retried: list = []
+        qa_retry_adiadas: list = []
         for repo, issue, state_comment_qa in qa_retries:
             issue_number_qa = issue["number"]
             if not auto:
@@ -3344,12 +3375,42 @@ def _run_stage(ctx: object, stage: str) -> None:
                     f"  Ative auto_dispatch para devolver a issue ao dev automaticamente."
                 )
                 continue
+            if vagas <= 0:
+                logger.info(
+                    "deployment[dev]: cota de concorrência cheia — qa-retry de %s#%s adiado",
+                    repo, issue_number_qa,
+                )
+                qa_retry_adiadas.append((repo, issue))
+                continue
+            # Sessão de dev já viva para a issue → não reprocessar (evita 2º
+            # re-dispatch). NOTA: diferente do dispatch dev normal, aqui NÃO se usa
+            # _issue_has_active_session, porque no fluxo qa-fail há sempre uma PR
+            # aberta (a que foi reprovada e que _process_qa_retry vai fechar) — o
+            # sinal "PR aberta" seria um falso positivo que bloquearia todo o fluxo.
+            # Os sinais confiáveis de sessão viva são o worktree ativo e o backstop
+            # lock; o lock anti-loop crewflow:running (add_labels da decisão) cobre
+            # o redispatch no próximo ciclo.
+            if _qa_retry_session_live(repo, issue_number_qa, dev_root):
+                logger.info(
+                    "deployment[dev]: sessão dev viva (worktree/lock) para %s#%s — qa-retry ignorado",
+                    repo, issue_number_qa,
+                )
+                qa_retry_adiadas.append((repo, issue))
+                continue
+            if not _resource_headroom_ok(ctx, max_conc):
+                logger.warning(
+                    "deployment[dev]: headroom crítico — qa-retry de %s#%s adiado",
+                    repo, issue_number_qa,
+                )
+                qa_retry_adiadas.append((repo, issue))
+                continue
             try:
                 _process_qa_retry(
                     ctx, repo, issue, cfg, provider, state_comment_qa,
                     dev_root=dev_root, squad=squad,
                 )
                 qa_retried.append((repo, issue))
+                vagas -= 1
             except Exception as exc:
                 logger.error(
                     "deployment[dev]: erro ao processar qa-retry para %s#%s: %s",

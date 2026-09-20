@@ -704,6 +704,11 @@ class TestQaFailCycle:
         assert "crewflow:qa-fail" in d.remove_labels
         assert "crewflow:qa" in d.remove_labels
 
+    def test_qa_fail_adiciona_running_como_lock_antiloop(self) -> None:
+        """QA_FAIL adiciona crewflow:running (lock anti-loop, espelha DISPATCH_REWORK)."""
+        d = decide(self._result_qa_fail(), state_comment=None)
+        assert "crewflow:running" in d.add_labels
+
     def test_qa_puro_ainda_notifica_qa(self) -> None:
         """crewflow:qa sem qa-fail mantém o comportamento NOTIFY_HUMAN QA."""
         r = _result(state=State.QA, labels=["crewflow:qa", "crewflow:feature"])

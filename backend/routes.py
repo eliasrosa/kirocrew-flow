@@ -248,7 +248,11 @@ def _load_issues_from_github() -> dict[str, object]:
             }
 
             # Issues com crewflow:qa-fail vão para a coluna "qa_fail" (QA reprovou —
-            # aguardando volta ao dev). Precede o blocked por ser o resultado de QA.
+            # aguardando volta ao dev). Precedência INTENCIONAL sobre blocked: qa-fail
+            # é transiente (o cron dev a devolve para todo no próximo ciclo), então o
+            # operador deve vê-la sob "Reprovado", não sob "Blocked". O caso raro de
+            # uma issue simultaneamente qa-fail e blocked aparece em qa_fail — o bloqueio
+            # continua nas labels e reaparece assim que o qa-fail é consumido.
             if Modifier.QA_FAIL in modifiers:
                 columns["qa_fail"].append(issue_entry)
             # Issues com crewflow:blocked vão para a coluna "blocked" (separada)
@@ -645,9 +649,10 @@ async def handle_qa_approve(request: web.Request, ctx: object = None) -> web.Res
     """Aprova uma issue no QA (botão "Aprovar QA" da UI).
 
     Body JSON: {"repo": "owner/repo", "number": 123}
-    Move a issue crewflow:qa para crewflow:done (a issue é fechada). Se a squad
-    tiver auto_merge_on_approve, o merge da PR ocorre no ciclo de merge.
-    Retorna {"ok": true}.
+    Se a squad do repo tiver ``auto_merge_on_approve`` ativo, faz o merge squash
+    da PR aberta (branch feat/issue-N), deleta a branch e move a issue para
+    crewflow:done. Caso contrário (merge manual), apenas move para crewflow:done.
+    Retorna {"ok": true} (com "merged": true quando o merge automático ocorreu).
     """
     try:
         body = await request.json()
@@ -687,12 +692,44 @@ async def handle_qa_approve(request: web.Request, ctx: object = None) -> web.Res
         )
 
 
-def _apply_qa_approve(repo: str, issue_number: int) -> dict:
-    """Aprova a issue no QA: crewflow:qa → crewflow:done (transição atômica de estado).
+def _auto_merge_on_approve_for_repo(repo: str) -> bool:
+    """Resolve a flag ``auto_merge_on_approve`` da squad que cobre este repo.
 
-    A issue é considerada concluída (o operador/cron fecha a issue via done). Se o
-    merge automático estiver ativo, o ciclo de merge cuida do PR — aqui apenas a
-    transição de estado é aplicada, consistente com as convenções do executor.
+    Percorre as squads configuradas em ``squads/`` e retorna True se alguma
+    squad que lista ``repo`` em ``projects`` tiver ``auto_merge_on_approve``
+    ativo. Fail-safe: qualquer erro ao carregar as squads retorna False (merge
+    manual — o padrão seguro).
+    """
+    app_root = Path(__file__).parent.parent
+    if str(app_root) not in sys.path:
+        sys.path.insert(0, str(app_root))
+
+    try:
+        from flow.config.squad import load_squads_dir
+
+        squads_dir = app_root / "squads"
+        if not squads_dir.exists():
+            return False
+        for squad in load_squads_dir(squads_dir):
+            if repo in squad.projects and squad.workflow_params.auto_merge_on_approve:
+                return True
+    except Exception as exc:
+        logger.debug("_auto_merge_on_approve_for_repo: falha ao resolver flag: %s", exc)
+    return False
+
+
+def _apply_qa_approve(repo: str, issue_number: int) -> dict:
+    """Aprova a issue no QA: opcionalmente mergeia a PR e move para crewflow:done.
+
+    Duas trilhas, conforme ``auto_merge_on_approve`` da squad do repo:
+      - auto_merge_on_approve=True: localiza a PR aberta (branch feat/issue-N),
+        faz o merge squash (mesma convenção de ``_execute_auto_merges``), deleta
+        a branch (best-effort) e transiciona a issue para crewflow:done.
+      - auto_merge_on_approve=False (padrão): apenas transiciona para
+        crewflow:done — o merge é manual (a UI/humano fecha a PR).
+
+    A transição de estado é atômica (``transition_state`` → State.DONE) e remove
+    qualquer crewflow:qa-fail residual. Preserva labels de tipo/prioridade.
     """
     app_root = Path(__file__).parent.parent
     if str(app_root) not in sys.path:
@@ -718,6 +755,30 @@ def _apply_qa_approve(repo: str, issue_number: int) -> dict:
             "error": f"issue #{issue_number} não está em crewflow:qa (estado atual: {state})",
         }
 
+    # Merge automático (opt-in por squad): mergeia a PR aberta antes do done.
+    merged = False
+    if _auto_merge_on_approve_for_repo(repo):
+        try:
+            pr = gh.get_pr_for_issue(repo, issue_number)
+        except ProviderError as exc:
+            return {"ok": False, "error": f"erro ao localizar a PR para merge: {exc}"}
+        if pr is None:
+            return {
+                "ok": False,
+                "error": f"auto_merge_on_approve ativo mas PR aberta de #{issue_number} não encontrada",
+            }
+        pr_number = pr["number"]
+        pr_branch = pr.get("headRefName") or ""
+        try:
+            gh.merge_pull_request(repo, pr_number, merge_method="squash")
+            merged = True
+        except ProviderError as exc:
+            return {"ok": False, "error": f"erro ao mergear a PR #{pr_number}: {exc}"}
+        if pr_branch:
+            import contextlib
+            with contextlib.suppress(Exception):
+                gh.delete_branch(repo, pr_branch)
+
     # Transição atômica → done, removendo qa-fail residual se presente.
     new_labels = transition_state(current_labels, State.DONE) - {Modifier.QA_FAIL.value}
 
@@ -726,5 +787,7 @@ def _apply_qa_approve(repo: str, issue_number: int) -> dict:
     except ProviderError as exc:
         return {"ok": False, "error": f"erro ao mover para crewflow:done: {exc}"}
 
-    logger.info("_apply_qa_approve: %s#%s → crewflow:done", repo, issue_number)
-    return {"ok": True, "done": True}
+    logger.info(
+        "_apply_qa_approve: %s#%s → crewflow:done (merged=%s)", repo, issue_number, merged
+    )
+    return {"ok": True, "done": True, "merged": merged}

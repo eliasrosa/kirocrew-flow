@@ -426,6 +426,217 @@ class TestHandleQaApprove:
 
 
 # ---------------------------------------------------------------------------
+# Tests: _apply_qa_fail — worker que aplica a transição de labels de reprovação
+# (os handler tests acima mockam o worker; aqui exercitamos a lógica real)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyQaFail:
+    def test_flips_qa_to_qa_fail_preserving_type_and_priority(self) -> None:
+        from backend.routes import _apply_qa_fail
+
+        with (
+            mock.patch(
+                "flow.adapters.github_client.get_work_item",
+                return_value={"labels": ["crewflow:qa", "crewflow:feature", "priority:high"]},
+            ),
+            mock.patch("flow.adapters.github_client.set_labels") as mock_set,
+            mock.patch("flow.adapters.github_client.add_issue_comment") as mock_comment,
+        ):
+            result = _apply_qa_fail("owner/repo", 42, "layout quebrado")
+
+        assert result["ok"] is True
+        applied = set(mock_set.call_args[0][2])
+        assert "crewflow:qa-fail" in applied
+        assert "crewflow:qa" not in applied
+        # Labels de tipo/prioridade preservadas
+        assert "crewflow:feature" in applied
+        assert "priority:high" in applied
+        # Motivo registrado como comentário com o prefixo esperado
+        mock_comment.assert_called_once()
+        assert "Reprovado no QA: layout quebrado" in mock_comment.call_args[0][2]
+
+    def test_rejects_issue_not_in_qa(self) -> None:
+        from backend.routes import _apply_qa_fail
+
+        with (
+            mock.patch(
+                "flow.adapters.github_client.get_work_item",
+                return_value={"labels": ["crewflow:dev", "crewflow:feature"]},
+            ),
+            mock.patch("flow.adapters.github_client.set_labels") as mock_set,
+        ):
+            result = _apply_qa_fail("owner/repo", 42, "x")
+
+        assert result["ok"] is False
+        mock_set.assert_not_called()
+
+    def test_ok_with_note_when_comment_fails(self) -> None:
+        from backend.routes import _apply_qa_fail
+        from flow.ports.issue_provider import ProviderError
+
+        with (
+            mock.patch(
+                "flow.adapters.github_client.get_work_item",
+                return_value={"labels": ["crewflow:qa", "crewflow:feature"]},
+            ),
+            mock.patch("flow.adapters.github_client.set_labels"),
+            mock.patch(
+                "flow.adapters.github_client.add_issue_comment",
+                side_effect=ProviderError("api down"),
+            ),
+        ):
+            result = _apply_qa_fail("owner/repo", 42, "x")
+
+        # Label trocada é o que importa para o cron → ok:true com nota
+        assert result["ok"] is True
+        assert "note" in result
+
+
+# ---------------------------------------------------------------------------
+# Tests: _apply_qa_approve — worker que aprova (opcionalmente mergeia) e vai a done
+# ---------------------------------------------------------------------------
+
+
+class TestApplyQaApprove:
+    def test_transitions_to_done_preserving_type_when_no_auto_merge(self) -> None:
+        from backend.routes import _apply_qa_approve
+
+        with (
+            mock.patch(
+                "flow.adapters.github_client.get_work_item",
+                return_value={"labels": ["crewflow:qa", "crewflow:feature", "priority:low"]},
+            ),
+            mock.patch("backend.routes._auto_merge_on_approve_for_repo", return_value=False),
+            mock.patch("flow.adapters.github_client.merge_pull_request") as mock_merge,
+            mock.patch("flow.adapters.github_client.set_labels") as mock_set,
+        ):
+            result = _apply_qa_approve("owner/repo", 42)
+
+        assert result["ok"] is True
+        assert result["merged"] is False
+        mock_merge.assert_not_called()
+        applied = set(mock_set.call_args[0][2])
+        assert "crewflow:done" in applied
+        assert "crewflow:qa" not in applied
+        assert "crewflow:qa-fail" not in applied
+        # Labels de tipo/prioridade preservadas na transição
+        assert "crewflow:feature" in applied
+        assert "priority:low" in applied
+
+    def test_rejects_issue_not_in_qa(self) -> None:
+        from backend.routes import _apply_qa_approve
+
+        with (
+            mock.patch(
+                "flow.adapters.github_client.get_work_item",
+                return_value={"labels": ["crewflow:review", "crewflow:feature"]},
+            ),
+            mock.patch("backend.routes._auto_merge_on_approve_for_repo", return_value=False),
+            mock.patch("flow.adapters.github_client.set_labels") as mock_set,
+        ):
+            result = _apply_qa_approve("owner/repo", 42)
+
+        assert result["ok"] is False
+        mock_set.assert_not_called()
+
+    def test_merges_pr_when_auto_merge_enabled(self) -> None:
+        from backend.routes import _apply_qa_approve
+
+        with (
+            mock.patch(
+                "flow.adapters.github_client.get_work_item",
+                return_value={"labels": ["crewflow:qa", "crewflow:feature"]},
+            ),
+            mock.patch("backend.routes._auto_merge_on_approve_for_repo", return_value=True),
+            mock.patch(
+                "flow.adapters.github_client.get_pr_for_issue",
+                return_value={"number": 7, "headRefName": "feat/issue-42"},
+            ),
+            mock.patch("flow.adapters.github_client.merge_pull_request") as mock_merge,
+            mock.patch("flow.adapters.github_client.delete_branch") as mock_del,
+            mock.patch("flow.adapters.github_client.set_labels") as mock_set,
+        ):
+            result = _apply_qa_approve("owner/repo", 42)
+
+        assert result["ok"] is True
+        assert result["merged"] is True
+        mock_merge.assert_called_once_with("owner/repo", 7, merge_method="squash")
+        mock_del.assert_called_once_with("owner/repo", "feat/issue-42")
+        applied = set(mock_set.call_args[0][2])
+        assert "crewflow:done" in applied
+
+    def test_auto_merge_without_open_pr_returns_error(self) -> None:
+        from backend.routes import _apply_qa_approve
+
+        with (
+            mock.patch(
+                "flow.adapters.github_client.get_work_item",
+                return_value={"labels": ["crewflow:qa", "crewflow:feature"]},
+            ),
+            mock.patch("backend.routes._auto_merge_on_approve_for_repo", return_value=True),
+            mock.patch("flow.adapters.github_client.get_pr_for_issue", return_value=None),
+            mock.patch("flow.adapters.github_client.set_labels") as mock_set,
+        ):
+            result = _apply_qa_approve("owner/repo", 42)
+
+        assert result["ok"] is False
+        mock_set.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: _load_issues_from_github — agrupamento de qa / qa-fail em colunas
+# ---------------------------------------------------------------------------
+
+
+class TestLoadIssuesGrouping:
+    def _run_grouping(self, items: list[dict]) -> dict:
+        """Roda _load_issues_from_github com uma squad e _fetch_all_state_items mockados."""
+        from backend.routes import _load_issues_from_github
+
+        squad = mock.MagicMock()
+        squad.name = "Test Squad"
+        squad.projects = ["owner/repo"]
+        squad.id = "test"
+        squad.issue_provider = "github"
+        squad.repos = frozenset({"owner/repo"})
+
+        with (
+            mock.patch("flow.config.squad.load_squads_dir", return_value=[squad]),
+            mock.patch("flow.ports.issue_provider.provider_for", return_value=mock.MagicMock()),
+            mock.patch("flow.scan.cache.open_cache", return_value=mock.MagicMock()),
+            mock.patch("backend.routes._fetch_all_state_items", return_value=items),
+            mock.patch("backend.routes._derive_implicit_state", return_value=None),
+            mock.patch("pathlib.Path.exists", return_value=True),
+        ):
+            return _load_issues_from_github()
+
+    def test_qa_issue_lands_in_qa_column(self) -> None:
+        items = [{
+            "number": 42,
+            "title": "em teste",
+            "repo": "owner/repo",
+            "labels": ["crewflow:qa", "crewflow:feature"],
+        }]
+        result = self._run_grouping(items)
+        cols = result["columns"]
+        assert [i["number"] for i in cols["qa"]] == [42]
+        assert cols["qa_fail"] == []
+
+    def test_qa_fail_issue_lands_in_qa_fail_column(self) -> None:
+        items = [{
+            "number": 43,
+            "title": "reprovado",
+            "repo": "owner/repo",
+            "labels": ["crewflow:qa", "crewflow:qa-fail", "crewflow:feature"],
+        }]
+        result = self._run_grouping(items)
+        cols = result["columns"]
+        assert [i["number"] for i in cols["qa_fail"]] == [43]
+        assert cols["qa"] == []
+
+
+# ---------------------------------------------------------------------------
 # Tests: helpers
 # ---------------------------------------------------------------------------
 
