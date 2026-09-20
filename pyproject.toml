@@ -9,6 +9,7 @@ description = "KiroCrew Flow — orquestração de esteira de desenvolvimento mu
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9",
+    "kirocrew-client",  # SDK do Crew Gateway — necessário para o backend subir via gateway
 ]
 
 [project.optional-dependencies]
