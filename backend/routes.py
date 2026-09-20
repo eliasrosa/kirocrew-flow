@@ -151,11 +151,20 @@ def _extract_issue_number(raw: dict) -> int | str:
     return num or ""
 
 
-def _load_issues_from_github() -> dict[str, list[dict]]:
-    """Carrega issues agrupadas por estágio crewflow:* via scan (zero-token, cache-first).
+_DEFAULT_SQUAD_NAME = "KiroCrew Flow"
+
+
+def _load_issues_from_github() -> dict[str, object]:
+    """Carrega issues agrupadas por estágio + metadados da squad (zero-token, cache-first).
 
     Usa o engine existente (flow/adapters + flow/scan) — sem gastar token.
-    Retorna um dict com chave = nome do estágio (ex: "todo") e valor = lista de issues.
+    Retorna um dict no formato do contrato da UI::
+
+        {"squad_name": <str>, "project": <str>, "columns": {<coluna>: [<issue>, ...]}}
+
+    ``squad_name`` vem do ``SquadConfig.name`` da primeira squad carregada
+    (fallback ``"KiroCrew Flow"``); ``project`` vem do primeiro item de
+    ``SquadConfig.projects`` (fallback ``""``).
     """
     app_root = Path(__file__).parent.parent
     if str(app_root) not in sys.path:
@@ -173,17 +182,21 @@ def _load_issues_from_github() -> dict[str, list[dict]]:
     squads_dir = app_root / "squads"
     if not squads_dir.exists():
         logger.warning("handle_issues: squads/ não encontrado em %s", app_root)
-        return _empty_columns()
+        return _empty_response()
 
     try:
         squads = load_squads_dir(squads_dir)
     except Exception as exc:
         logger.warning("handle_issues: falha ao carregar squads: %s", exc)
-        return _empty_columns()
+        return _empty_response()
 
     if not squads:
         logger.warning("handle_issues: nenhuma squad configurada em %s", squads_dir)
-        return _empty_columns()
+        return _empty_response()
+
+    # squad_name/project vêm da primeira squad configurada (fallback seguro).
+    squad_name = squads[0].name or _DEFAULT_SQUAD_NAME
+    project = squads[0].projects[0] if squads[0].projects else ""
 
     # Agrupa por estágio (todos os results de todas as squads)
     columns: dict[str, list[dict]] = _empty_columns()
@@ -217,12 +230,13 @@ def _load_issues_from_github() -> dict[str, list[dict]]:
             if state is None:
                 continue
 
-            # Mapeia State → nome da coluna do kanban
-            col = _state_to_column(state)
+            modifiers = parse_modifiers(labels)
+
+            # Resolve a coluna final aplicando a precedência (blocked >
+            # review_ok > estado). None → etapa não exibida (ex.: State.QA).
+            col = _resolve_column(state, modifiers)
             if col is None:
                 continue
-
-            modifiers = parse_modifiers(labels)
 
             # Calcula age_min: tempo desde a criação ou updated_at
             created_at = raw.get("created_at") or ""
@@ -239,13 +253,10 @@ def _load_issues_from_github() -> dict[str, list[dict]]:
                 "running": Modifier.RUNNING in modifiers,
             }
 
-            # Issues com crewflow:blocked vão para a coluna "blocked" (separada)
-            if Modifier.BLOCKED in modifiers:
-                columns["blocked"].append(issue_entry)
-            else:
-                columns[col].append(issue_entry)
+            # col já reflete a precedência resolvida em _resolve_column.
+            columns[col].append(issue_entry)
 
-    return columns
+    return {"squad_name": squad_name, "project": project, "columns": columns}
 
 
 def _fetch_all_state_items(projects: list[str], provider: object) -> list[dict]:
@@ -283,29 +294,65 @@ def _state_to_column(state: object) -> str | None:
     """Mapeia um State para o nome da coluna do Kanban."""
     from flow.domain.state import State
 
+    # State.QA é uma etapa humana manual (deploy HML + teste) que não aparece
+    # como painel de agente na nova UI, então mapeia para None (é omitida). A
+    # coluna "review_ok" NÃO é um State: é derivada de State.REVIEW +
+    # Modifier.REVIEW_OK em _load_issues_from_github.
     mapping: dict[State, str | None] = {
+        State.SPEC: "spec",
+        State.READY: "ready",
         State.TODO: "todo",
         State.DEV: "dev",
         State.REVIEW: "review",
-        State.QA: "reviewed",  # QA é pós-review = coluna "reviewed" no kanban
+        State.QA: None,     # etapa humana; não exibida na UI de agentes
         State.DONE: "done",
-        State.SPEC: None,   # spec não aparece no kanban
-        State.READY: None,  # ready não aparece no kanban
     }
     if not isinstance(state, State):
         return None
     return mapping.get(state)
 
 
+def _resolve_column(state: object, modifiers: object) -> str | None:
+    """Decide a coluna final de uma issue a partir de (state, modifiers).
+
+    Regras (mesma precedência de _load_issues_from_github):
+      - Modifier.BLOCKED → "blocked" independente do estado.
+      - State.REVIEW + Modifier.REVIEW_OK → "review_ok" (aguardando merge).
+      - Caso contrário → _state_to_column(state) (pode ser None se a etapa não
+        for exibida, ex.: State.QA).
+
+    Função pura (sem I/O) para facilitar teste unitário direto.
+    """
+    from flow.domain.state import Modifier, State
+
+    mods = modifiers if isinstance(modifiers, (set, frozenset)) else set()
+    if Modifier.BLOCKED in mods:
+        return "blocked"
+    if state is State.REVIEW and Modifier.REVIEW_OK in mods:
+        return "review_ok"
+    return _state_to_column(state)
+
+
 def _empty_columns() -> dict[str, list[dict]]:
-    """Retorna as colunas vazias do kanban."""
+    """Retorna as colunas vazias na ordem do contrato da UI."""
     return {
+        "spec": [],
+        "ready": [],
         "todo": [],
         "dev": [],
         "review": [],
-        "reviewed": [],
+        "review_ok": [],
         "done": [],
         "blocked": [],
+    }
+
+
+def _empty_response() -> dict[str, object]:
+    """Resposta de fallback: squad_name/project default + colunas vazias."""
+    return {
+        "squad_name": _DEFAULT_SQUAD_NAME,
+        "project": "",
+        "columns": _empty_columns(),
     }
 
 
@@ -334,12 +381,17 @@ async def handle_issues(request: web.Request, ctx: object = None) -> web.Respons
     """Lista issues por estágio (crewflow:*). Zero-token, cache-first."""
     try:
         loop = asyncio.get_running_loop()
-        columns = await loop.run_in_executor(None, _load_issues_from_github)
-        return web.json_response({"columns": columns})
+        payload = await loop.run_in_executor(None, _load_issues_from_github)
+        return web.json_response(payload)
     except Exception as exc:
         logger.exception("handle_issues: erro inesperado: %s", exc)
         return web.json_response(
-            {"error": str(exc), "columns": _empty_columns()},
+            {
+                "error": str(exc),
+                "squad_name": _DEFAULT_SQUAD_NAME,
+                "project": "",
+                "columns": _empty_columns(),
+            },
             status=500,
         )
 

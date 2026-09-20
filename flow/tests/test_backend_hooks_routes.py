@@ -3,8 +3,9 @@
 Critérios de aceite:
 - register_routes(app) registra as 3 rotas + on_startup + on_cleanup
 - handle_health retorna {"ok": true, "app": "kirocrew-flow", "version": "1.0.0"}
-- handle_issues retorna {"columns": {todo, dev, review, reviewed, done, blocked}}
-  mesmo em caso de erro no scan (fallback para colunas vazias)
+- handle_issues retorna {"squad_name", "project", "columns": {spec, ready, todo,
+  dev, review, review_ok, done, blocked}} mesmo em caso de erro no scan
+  (fallback para squad_name='KiroCrew Flow', project='', colunas vazias)
 - handle_dispatch valida o body e retorna {"ok": true/false, ...}
 - _start_loops cria 4 tasks asyncio e imprime log
 - _stop_loops cancela tasks e limpa a lista
@@ -32,6 +33,7 @@ from backend.routes import (  # noqa: E402
     _age_minutes,
     _empty_columns,
     _repo_from_key,
+    _resolve_column,
     _start_loops,
     _state_to_column,
     _stop_loops,
@@ -162,29 +164,45 @@ class TestHandleHealth:
 
 
 class TestHandleIssues:
-    def _run_with_mock_loader(self, columns: dict) -> dict:
+    def _empty_payload(self) -> dict:
+        """Payload de fallback no formato do contrato (squad_name/project/columns)."""
+        return {
+            "squad_name": "KiroCrew Flow",
+            "project": "",
+            "columns": _empty_columns(),
+        }
+
+    def _run_with_mock_loader(self, payload: dict) -> dict:
         """Executa handle_issues com _load_issues_from_github mockado."""
-        with mock.patch("backend.routes._load_issues_from_github", return_value=columns):
+        with mock.patch("backend.routes._load_issues_from_github", return_value=payload):
             loop = asyncio.get_event_loop()
             response = loop.run_until_complete(handle_issues(_make_request()))
         return _parse_body(response)
 
     def test_returns_columns_key(self) -> None:
-        body = self._run_with_mock_loader(_empty_columns())
+        body = self._run_with_mock_loader(self._empty_payload())
         assert "columns" in body
 
     def test_returns_all_column_keys(self) -> None:
-        body = self._run_with_mock_loader(_empty_columns())
-        for key in ("todo", "dev", "review", "reviewed", "done", "blocked"):
+        body = self._run_with_mock_loader(self._empty_payload())
+        for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "done", "blocked"):
             assert key in body["columns"], f"coluna '{key}' ausente no retorno"
 
+    def test_returns_squad_name_and_project(self) -> None:
+        payload = self._empty_payload()
+        payload["squad_name"] = "Minha Squad"
+        payload["project"] = "owner/repo"
+        body = self._run_with_mock_loader(payload)
+        assert body["squad_name"] == "Minha Squad"
+        assert body["project"] == "owner/repo"
+
     def test_returns_issues_in_correct_column(self) -> None:
-        cols = _empty_columns()
-        cols["todo"] = [
+        payload = self._empty_payload()
+        payload["columns"]["todo"] = [
             {"number": 42, "title": "Test", "repo": "owner/repo", "url": "", "age_min": 10,
              "labels": ["crewflow:todo"], "blocked": False, "running": False}
         ]
-        body = self._run_with_mock_loader(cols)
+        body = self._run_with_mock_loader(payload)
         assert len(body["columns"]["todo"]) == 1
         assert body["columns"]["todo"][0]["number"] == 42
 
@@ -198,7 +216,9 @@ class TestHandleIssues:
             response = loop.run_until_complete(handle_issues(_make_request()))
         body = _parse_body(response)
         assert "columns" in body
-        for key in ("todo", "dev", "review", "reviewed", "done", "blocked"):
+        assert body["squad_name"] == "KiroCrew Flow"
+        assert body["project"] == ""
+        for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "done", "blocked"):
             assert body["columns"][key] == []
 
     def test_status_500_on_error(self) -> None:
@@ -330,21 +350,58 @@ class TestStateToColumn:
         from flow.domain.state import State
         assert _state_to_column(State.REVIEW) == "review"
 
-    def test_qa_maps_to_reviewed(self) -> None:
+    def test_qa_maps_to_none(self) -> None:
+        """State.QA é etapa humana manual: não aparece na UI de agentes (None)."""
         from flow.domain.state import State
-        assert _state_to_column(State.QA) == "reviewed"
+        assert _state_to_column(State.QA) is None
 
     def test_done_maps_to_done(self) -> None:
         from flow.domain.state import State
         assert _state_to_column(State.DONE) == "done"
 
-    def test_spec_maps_to_none(self) -> None:
+    def test_spec_maps_to_spec(self) -> None:
         from flow.domain.state import State
-        assert _state_to_column(State.SPEC) is None
+        assert _state_to_column(State.SPEC) == "spec"
 
-    def test_ready_maps_to_none(self) -> None:
+    def test_ready_maps_to_ready(self) -> None:
         from flow.domain.state import State
-        assert _state_to_column(State.READY) is None
+        assert _state_to_column(State.READY) == "ready"
+
+
+class TestResolveColumn:
+    """Precedência de roteamento: blocked > review_ok > estado."""
+
+    def test_review_with_review_ok_goes_to_review_ok(self) -> None:
+        from flow.domain.state import Modifier, State
+        assert _resolve_column(State.REVIEW, {Modifier.REVIEW_OK}) == "review_ok"
+
+    def test_review_without_review_ok_goes_to_review(self) -> None:
+        from flow.domain.state import State
+        assert _resolve_column(State.REVIEW, set()) == "review"
+
+    def test_blocked_takes_precedence_over_state(self) -> None:
+        from flow.domain.state import Modifier, State
+        assert _resolve_column(State.DEV, {Modifier.BLOCKED}) == "blocked"
+
+    def test_blocked_takes_precedence_over_review_ok(self) -> None:
+        from flow.domain.state import Modifier, State
+        assert (
+            _resolve_column(State.REVIEW, {Modifier.BLOCKED, Modifier.REVIEW_OK})
+            == "blocked"
+        )
+
+    def test_review_ok_modifier_outside_review_uses_state(self) -> None:
+        """REVIEW_OK só promove para review_ok quando o estado é REVIEW."""
+        from flow.domain.state import Modifier, State
+        assert _resolve_column(State.DEV, {Modifier.REVIEW_OK}) == "dev"
+
+    def test_qa_returns_none(self) -> None:
+        from flow.domain.state import State
+        assert _resolve_column(State.QA, set()) is None
+
+    def test_spec_returns_spec(self) -> None:
+        from flow.domain.state import State
+        assert _resolve_column(State.SPEC, set()) == "spec"
 
 
 class TestRepoFromKey:
@@ -361,8 +418,9 @@ class TestRepoFromKey:
 class TestEmptyColumns:
     def test_has_all_required_keys(self) -> None:
         cols = _empty_columns()
-        for key in ("todo", "dev", "review", "reviewed", "done", "blocked"):
-            assert key in cols
+        assert set(cols.keys()) == {
+            "spec", "ready", "todo", "dev", "review", "review_ok", "done", "blocked",
+        }
 
     def test_all_values_are_empty_lists(self) -> None:
         cols = _empty_columns()
