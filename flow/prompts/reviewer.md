@@ -90,3 +90,17 @@ Execute UMA vez, do início ao fim, e PARE:
 - Seja objetivo — aponte problemas concretos, não estilo pessoal.
 - CI vermelho sempre bloqueia — mesmo que o código esteja correto.
 - Resultado completo vai em DOIS lugares: PR (passo 7) e issue (passo 8).
+
+### Fluxo pós-review (QA)
+
+Depois do merge (review-ok → merge), a issue segue para `crewflow:qa` (validação em
+HML pelo QA). O QA pode:
+
+- **Aprovar**: a issue vai para `crewflow:done` (botão "Aprovar QA" na UI).
+- **Reprovar**: o operador troca `crewflow:qa` por `crewflow:qa-fail` (botão "Reprovar
+  QA" na UI) e registra o motivo como comentário `Reprovado no QA: <motivo>`. O cron
+  `crewflow-dev` detecta `crewflow:qa-fail`, devolve a issue para `crewflow:todo`,
+  fecha a PR atual e re-despacha uma nova sessão de dev — que recebe o motivo da
+  reprovação (via o comentário na issue) no prompt. A correção gera uma NOVA PR.
+
+Fluxo completo: dev → review → review-ok → qa → (aprovado: merge/done | reprovado: todo).

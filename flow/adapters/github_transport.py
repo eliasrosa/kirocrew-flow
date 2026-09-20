@@ -196,6 +196,30 @@ def merge_pull_request(owner_repo: str, pr_number: int, merge_method: str = "squ
     ]))
 
 
+def close_pull_request(owner_repo: str, pr_number: int, comment: str | None = None) -> None:
+    """Fecha um PR (sem merge) via gh CLI, opcionalmente com um comentário.
+
+    Usado quando o QA reprova: a correção vai gerar uma nova PR, então a PR
+    atual é fechada com o motivo da reprovação. Lança ``ProviderError`` se o
+    fechamento falhar; 404 (PR inexistente/já fechado) é silencioso.
+    """
+    cmd = ["gh", "pr", "close", str(pr_number), "--repo", owner_repo]
+    if comment:
+        cmd += ["--comment", comment]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "404" in stderr or "not found" in stderr.lower() or "no pull requests found" in stderr.lower():
+            return  # PR já fechado ou inexistente — não é erro
+        raise ProviderError(f"close_pull_request {pr_number}: {stderr}")
+
+
 def get_pr_comments(owner_repo: str, pr_number: int) -> list:
     """Retorna os comentários (issue comments) de um PR.
 

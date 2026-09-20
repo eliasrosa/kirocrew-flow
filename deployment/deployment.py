@@ -689,7 +689,8 @@ _DEV_PROMPT_FALLBACK = (
     "| Repo | `{{repo}}` |\n"
     "| Issue | [#{{issue_number}}]({{issue_url}}) — {{issue_title}} |\n\n"
     "## Contexto da task\n\n"
-    "Você é um agente de implementação ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.\n\n"
+    "Você é um agente de implementação ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.\n"
+    "{{qa_fail_context}}\n"
     "### Fluxo\n\n"
     "Execute UMA vez, do início ao fim, e PARE:\n\n"
     "1. CONTEXTO: leia TODA a documentação do repo antes de qualquer ação:\n"
@@ -746,6 +747,7 @@ def _dispatch_prompt(
     issue: dict,
     cfg: dict,
     prompt_extra: str = "",
+    qa_fail_context: str = "",
 ) -> str:
     """Carrega e renderiza o template MD do estágio 'dev'.
 
@@ -787,6 +789,7 @@ def _dispatch_prompt(
             notify_step=notify_step,
             vault_step=vault_step,
             prompt_extra=prompt_extra.strip(),
+            qa_fail_context=qa_fail_context.strip(),
         )
     except PromptRenderError:
         logger.exception(
@@ -864,6 +867,7 @@ def _dispatch(
     issue: dict,
     cfg: dict,
     prompt_extra: str = "",
+    qa_fail_context: str = "",
 ) -> None:
     """Fire-and-forget POST /api/chat (loopback interno).
 
@@ -899,7 +903,7 @@ def _dispatch(
 
     slot = f"esteira-{repo.split('/')[-1]}-{issue['number']}"
     try:
-        message = _dispatch_prompt(repo, issue, cfg, prompt_extra=prompt_extra)
+        message = _dispatch_prompt(repo, issue, cfg, prompt_extra=prompt_extra, qa_fail_context=qa_fail_context)
     except PromptRenderError as exc:
         logger.error(
             "deployment: _dispatch abortado — template 'dev' inválido para %s#%s: %s",
@@ -945,6 +949,162 @@ def _scan_result_to_issue(result: object) -> dict:
         "title": item.title,
         "url": item.key,  # key é a URL canônica no adapter GitHub
     }
+
+
+# ── QA reprovou: devolve a issue para dev com o motivo da reprovação ─────
+
+_QA_FAIL_REASON_PREFIX = "Reprovado no QA:"
+
+
+def _extract_qa_fail_reason(repo: str, issue_number: int, provider: object) -> str:
+    """Extrai o motivo da reprovação de QA dos comentários da issue.
+
+    O backend (endpoint /qa-fail) registra o motivo como um comentário
+    ``Reprovado no QA: <motivo>``. Procura o comentário mais recente com esse
+    prefixo e retorna o texto do motivo. Retorna "" se nenhum for encontrado
+    (fail-safe: o dispatch segue sem contexto extra).
+    """
+    reason = ""
+    try:
+        import re as _re
+
+        _prov = provider  # type: ignore[assignment]
+        raw = _prov.get_work_item(repo, str(issue_number))  # type: ignore[attr-defined]
+        # Nem todo provider expõe comentários no work_item; usa o gh client.
+        from flow.adapters import github_client as _gh
+        comments = _gh.get_issue_comments(repo, issue_number) if hasattr(_gh, "get_issue_comments") else []
+        for comment in comments:
+            body = comment.get("body", "") if isinstance(comment, dict) else ""
+            if _QA_FAIL_REASON_PREFIX in body:
+                after = body.split(_QA_FAIL_REASON_PREFIX, 1)[1].strip()
+                # Remove marcadores de comentário de estado se presentes
+                after = _re.sub(r"<!--.*?-->", "", after, flags=_re.DOTALL).strip()
+                if after:
+                    reason = after
+        _ = raw  # evita lint de variável não usada em versões sem comentários
+    except Exception as exc:
+        logger.debug(
+            "deployment: não foi possível extrair motivo de qa-fail para %s#%s: %s",
+            repo, issue_number, exc,
+        )
+    return reason
+
+
+def _qa_fail_prompt_context(reason: str) -> str:
+    """Monta o bloco de contexto de reprovação de QA injetado no prompt do dev.
+
+    Vazio quando não há reprovação (dispatch normal). Para um re-dispatch pós
+    qa-fail, instrui o dev a ler o comentário da issue e corrigir o que foi
+    reprovado.
+    """
+    motivo = reason.strip() or "(ver comentário 'Reprovado no QA:' na issue)"
+    return (
+        "\n> ⚠️ **Re-trabalho pós reprovação de QA.** Esta issue voltou para "
+        "`crewflow:todo` porque o QA reprovou a entrega anterior. "
+        f"Motivo da reprovação: {motivo}\n"
+        "> Leia o comentário `Reprovado no QA:` na issue antes de implementar e "
+        "garanta que a correção cobre exatamente o que foi reprovado. Uma nova PR "
+        "será aberta para a correção.\n"
+    )
+
+
+def _process_qa_retry(
+    ctx: object,
+    repo: str,
+    issue: dict,
+    cfg: dict,
+    provider: object,
+    state_comment: str | None,
+    dev_root: str,
+    squad: object | None = None,
+) -> None:
+    """Processa uma issue reprovada no QA (crewflow:qa-fail).
+
+    Passos (todos com efeito colateral — só chamado fora de dry_run):
+      1. Transição atômica de estado → crewflow:todo, removendo qa-fail/qa.
+      2. Extrai o motivo da reprovação do comentário da issue.
+      3. Fecha a PR atual (branch feat/issue-N) com um comentário "Reprovado no QA: <motivo>".
+      4. Posta um comentário na issue com o contexto para a próxima sessão de dev.
+      5. Re-despacha uma sessão de dev com o contexto da reprovação no prompt.
+    """
+    issue_number = issue["number"]
+    _prov = provider  # type: ignore[assignment]
+
+    # 1. Transição de estado → todo (remove qa-fail e qa)
+    try:
+        item_data = _prov.get_work_item(repo, str(issue_number))  # type: ignore[attr-defined]
+        current_labels = list(item_data.get("labels", []))
+    except Exception:
+        current_labels = []
+    new_labels = _apply_state_transition(
+        current_labels,
+        State.TODO,
+        remove_modifiers=("crewflow:qa-fail", "crewflow:qa"),
+    )
+    _prov.set_labels(repo, str(issue_number), new_labels)  # type: ignore[attr-defined]
+
+    # 2. Motivo da reprovação
+    reason = _extract_qa_fail_reason(repo, issue_number, provider)
+
+    # 3. Fecha a PR atual (se existir) com o motivo
+    branch = f"feat/issue-{issue_number}"
+    pr_number_qa: int | None = None
+    try:
+        _pr_res = subprocess.run(
+            ["gh", "pr", "list", "--repo", repo, "--head", branch,
+             "--state", "open", "--json", "number"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if _pr_res.returncode == 0:
+            _prs = json.loads(_pr_res.stdout or "[]")
+            if _prs:
+                pr_number_qa = int(_prs[0]["number"])
+    except Exception as exc:
+        logger.warning(
+            "deployment[dev]: erro ao localizar PR para qa-retry %s#%s: %s",
+            repo, issue_number, exc,
+        )
+    if pr_number_qa is not None:
+        close_comment = f"{_QA_FAIL_REASON_PREFIX} {reason}".strip() if reason else (
+            f"{_QA_FAIL_REASON_PREFIX} (ver comentário na issue). "
+            "A correção será entregue em uma nova PR."
+        )
+        try:
+            from flow.adapters import github_client as _gh
+            _gh.close_pull_request(repo, pr_number_qa, comment=close_comment)
+            logger.info(
+                "deployment[dev]: PR #%s de %s#%s fechada (qa-fail)",
+                pr_number_qa, repo, issue_number,
+            )
+        except Exception as exc:
+            logger.error(
+                "deployment[dev]: erro ao fechar PR #%s de %s#%s: %s",
+                pr_number_qa, repo, issue_number, exc,
+            )
+
+    # 4. Comentário na issue com o contexto para a próxima sessão de dev
+    try:
+        from flow.adapters import github_client as _gh
+        issue_comment = (
+            f"🔁 Issue devolvida ao desenvolvimento após reprovação de QA. "
+            f"{_QA_FAIL_REASON_PREFIX} {reason}".strip()
+            if reason
+            else (
+                "🔁 Issue devolvida ao desenvolvimento após reprovação de QA. "
+                f"{_QA_FAIL_REASON_PREFIX} (motivo não informado)."
+            )
+        )
+        _gh.add_issue_comment(repo, issue_number, issue_comment)
+    except Exception as exc:
+        logger.debug(
+            "deployment[dev]: não foi possível comentar contexto de qa-fail em %s#%s: %s",
+            repo, issue_number, exc,
+        )
+
+    # 5. Re-despacha a sessão de dev com o contexto da reprovação
+    prompt_extra = squad.dispatch_prompt_extra if squad else ""  # type: ignore[attr-defined]
+    qa_fail_context = _qa_fail_prompt_context(reason)
+    _dispatch(ctx, repo, issue, cfg, prompt_extra=prompt_extra, qa_fail_context=qa_fail_context)
 
 
 # ── Shadow mode: estado implícito em paralelo com labels ─────────────────
@@ -1097,10 +1257,12 @@ def _dry_run_report(
     spec_invalid: list,
     conflict_resolvers: list | None = None,
     mark_conflitos: list | None = None,
+    qa_retries: list | None = None,
 ) -> None:
     """Imprime o relatório de dry-run no stdout sem executar nenhum efeito colateral."""
     _conflict_resolvers = conflict_resolvers or []
     _mark_conflitos = mark_conflitos or []
+    _qa_retries = qa_retries or []
 
     print("[DRY-RUN] ──────────────────────────────────────────")
     print(f"[DRY-RUN] {len(scan_results)} issue(s) processada(s) pelo scan")
@@ -1115,6 +1277,9 @@ def _dry_run_report(
 
     for repo, issue, _sc in dispatch_reworks:
         print(f"[DRY-RUN] {repo}#{issue['number']} → DISPATCH_REWORK — {issue['title']}")
+
+    for repo, issue, _sc in _qa_retries:
+        print(f"[DRY-RUN] {repo}#{issue['number']} → DISPATCH_QA_RETRY (qa-fail → todo + re-dispatch) — {issue['title']}")
 
     for repo, issue in _conflict_resolvers:
         print(f"[DRY-RUN] {repo}#{issue['number']} → DISPATCH_CONFLICT_RESOLVER — {issue['title']}")
@@ -1143,7 +1308,7 @@ def _dry_run_report(
         print(f"[DRY-RUN] {r.item.key} → SPEC_INVALID (sem repo no título) — {r.item.title}")
 
     total_actions = (
-        len(dispatch_devs) + len(dispatch_reviewers) + len(dispatch_reworks) + len(merge_prs)
+        len(dispatch_devs) + len(_qa_retries) + len(dispatch_reviewers) + len(dispatch_reworks) + len(merge_prs)
         + len(needs_human) + len(rebranded) + len(blocked_bypass) + len(spec_invalid)
     )
     skipped = max(0, len(scan_results) - total_actions)
@@ -2817,7 +2982,7 @@ _STAGE_CONFLITO = "conflito"
 #                          já foi aplicado na issue (Modifier.CONFLITO presente).
 #   - dispatch_rework    → _STAGE_CONFLITO: re-trabalho pós-review (review-fail).
 _STAGE_ACTIONS = {
-    _STAGE_DEV:      frozenset({"dispatch_dev"}),
+    _STAGE_DEV:      frozenset({"dispatch_dev", "dispatch_qa_retry"}),
     _STAGE_REVIEWER: frozenset({"dispatch_reviewer", "mark_conflito"}),
     _STAGE_MERGE:    frozenset({"merge_pr"}),
     _STAGE_CONFLITO: frozenset({"dispatch_rework", "dispatch_conflict_resolver"}),
@@ -2961,6 +3126,7 @@ def _run_stage(ctx: object, stage: str) -> None:
 
     spec_invalid: list = []
     dispatch_devs: list = []
+    qa_retries: list = []  # (repo, issue, state_comment) — QA reprovou; volta para todo + re-dispatch dev
     dispatch_reviewers: list = []
     dispatch_reworks: list = []
     conflict_resolvers: list = []  # (repo, issue) — despacha sessão de resolução de conflito
@@ -2982,6 +3148,7 @@ def _run_stage(ctx: object, stage: str) -> None:
             or (result.current_state is State.TODO and "crewflow:debt" in result.item.labels)
             or (result.current_state is State.REVIEW and Modifier.REVIEWED in result.modifiers)
             or (Modifier.REVIEW_FAIL in result.modifiers)
+            or (Modifier.QA_FAIL in result.modifiers)
         )
         state_comment: str | None = None
         if needs_comment:
@@ -3035,6 +3202,13 @@ def _run_stage(ctx: object, stage: str) -> None:
                 repo = repos[0] if repos else ""
             issue = _scan_result_to_issue(result)
             dispatch_devs.append((repo, issue, decision))
+
+        elif decision.action is ActionKind.DISPATCH_QA_RETRY:
+            repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
+            if not repo:
+                repo = repos[0] if repos else ""
+            issue = _scan_result_to_issue(result)
+            qa_retries.append((repo, issue, state_comment))
 
         elif decision.action is ActionKind.DISPATCH_REVIEWER:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
@@ -3093,7 +3267,7 @@ def _run_stage(ctx: object, stage: str) -> None:
         spec_invalid=len(spec_invalid),
     )
 
-    if not any([spec_invalid, dispatch_devs, dispatch_reviewers, dispatch_reworks,
+    if not any([spec_invalid, dispatch_devs, qa_retries, dispatch_reviewers, dispatch_reworks,
                 conflict_resolvers, mark_conflitos,
                 needs_human, blocked_bypass, rebranded, merge_prs, dead_session_candidates_stage]):
         return
@@ -3111,6 +3285,7 @@ def _run_stage(ctx: object, stage: str) -> None:
             spec_invalid=spec_invalid,
             conflict_resolvers=conflict_resolvers,
             mark_conflitos=mark_conflitos,
+            qa_retries=qa_retries,
         )
         return
 
@@ -3157,6 +3332,36 @@ def _run_stage(ctx: object, stage: str) -> None:
                 adiadas.append((repo, issue))
 
         _conn_stage_disp.close()
+
+        # ── QA reprovou (crewflow:qa-fail): volta a issue para todo + re-dispatch dev ──
+        qa_retried: list = []
+        for repo, issue, state_comment_qa in qa_retries:
+            issue_number_qa = issue["number"]
+            if not auto:
+                ctx.notify(  # type: ignore[attr-defined]
+                    f"KiroCrew Flow [dev] (Fase 1): QA reprovou — "
+                    f"{repo}#{issue_number_qa}: {issue['title']}.{vm}\n"
+                    f"  Ative auto_dispatch para devolver a issue ao dev automaticamente."
+                )
+                continue
+            try:
+                _process_qa_retry(
+                    ctx, repo, issue, cfg, provider, state_comment_qa,
+                    dev_root=dev_root, squad=squad,
+                )
+                qa_retried.append((repo, issue))
+            except Exception as exc:
+                logger.error(
+                    "deployment[dev]: erro ao processar qa-retry para %s#%s: %s",
+                    repo, issue_number_qa, exc,
+                )
+
+        if auto and qa_retried:
+            linhas_qa = "\n".join(f"  - {r}#{i['number']}: {i['title']}" for r, i in qa_retried)
+            ctx.notify(  # type: ignore[attr-defined]
+                f"KiroCrew Flow [dev]: {len(qa_retried)} issue(s) reprovada(s) no QA devolvida(s) "
+                f"para crewflow:todo e re-despachada(s).{vm}\n{linhas_qa}"
+            )
 
         # ── Detecção e recuperação de sessões mortas no estágio dev ─────────
         for result in dead_session_candidates_stage:

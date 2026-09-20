@@ -124,6 +124,8 @@ def register_routes(ctx: object) -> list:
         AppRoute("GET", "/health", handle_health),
         AppRoute("GET", "/issues", handle_issues),
         AppRoute("POST", "/dispatch", handle_dispatch),
+        AppRoute("POST", "/qa-fail", handle_qa_fail),
+        AppRoute("POST", "/qa-approve", handle_qa_approve),
     ]
 
 
@@ -245,8 +247,12 @@ def _load_issues_from_github() -> dict[str, object]:
                 "implicit_state": _derive_implicit_state(raw, raw.get("repo", "") or _repo_from_key(raw.get("key", ""))),
             }
 
+            # Issues com crewflow:qa-fail vão para a coluna "qa_fail" (QA reprovou —
+            # aguardando volta ao dev). Precede o blocked por ser o resultado de QA.
+            if Modifier.QA_FAIL in modifiers:
+                columns["qa_fail"].append(issue_entry)
             # Issues com crewflow:blocked vão para a coluna "blocked" (separada)
-            if Modifier.BLOCKED in modifiers:
+            elif Modifier.BLOCKED in modifiers:
                 columns["blocked"].append(issue_entry)
             # Issues em review + review_ok vão para coluna "review_ok"
             elif col == "review" and Modifier.REVIEW_OK in modifiers:
@@ -298,7 +304,7 @@ def _state_to_column(state: object) -> str | None:
         State.TODO:   "todo",
         State.DEV:    "dev",
         State.REVIEW: "review",
-        State.QA:     "review_ok",  # QA é pós-aprovação — aparece no painel Code Review/Aprovado
+        State.QA:     "qa",  # QA é seção própria (pós review-ok, antes de done)
         State.DONE:   "done",
     }
     if not isinstance(state, State):
@@ -316,6 +322,8 @@ def _empty_columns() -> dict[str, list[dict]]:
         "review": [],
         "review_ok": [],
         "reviewed": [],
+        "qa": [],
+        "qa_fail": [],
         "done": [],
         "blocked": [],
     }
@@ -523,3 +531,200 @@ def _force_dispatch(repo: str, issue_number: int) -> dict:
         }
 
     return {"ok": True, "dispatched": True}
+
+
+async def handle_qa_fail(request: web.Request, ctx: object = None) -> web.Response:
+    """Reprova uma issue no QA (botão "Reprovar QA" da UI).
+
+    Body JSON: {"repo": "owner/repo", "number": 123, "reason": "texto do motivo"}
+    Troca a label crewflow:qa por crewflow:qa-fail e registra o motivo como um
+    comentário na issue. O cron crewflow-dev detecta qa-fail no próximo ciclo e
+    devolve a issue para crewflow:todo com re-dispatch automático.
+    Retorna {"ok": true}.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"ok": False, "error": "body JSON inválido"},
+            status=400,
+        )
+
+    repo = body.get("repo", "")
+    number = body.get("number")
+    reason = body.get("reason", "") or ""
+
+    if not repo or not number:
+        return web.json_response(
+            {"ok": False, "error": "campos 'repo' e 'number' são obrigatórios"},
+            status=400,
+        )
+
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        return web.json_response(
+            {"ok": False, "error": "'number' deve ser um inteiro"},
+            status=400,
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _apply_qa_fail, repo, number, reason)
+        status = 200 if result.get("ok") else 400
+        return web.json_response(result, status=status)
+    except Exception as exc:
+        logger.exception("handle_qa_fail: erro inesperado: %s", exc)
+        return web.json_response(
+            {"ok": False, "error": str(exc)},
+            status=500,
+        )
+
+
+def _apply_qa_fail(repo: str, issue_number: int, reason: str) -> dict:
+    """Aplica a reprovação de QA: crewflow:qa → crewflow:qa-fail + comentário do motivo.
+
+    Preserva labels de tipo/prioridade (só troca o modificador de QA). Registra o
+    motivo como comentário ``Reprovado no QA: <reason>`` para o dev picar no
+    próximo ciclo.
+    """
+    app_root = Path(__file__).parent.parent
+    if str(app_root) not in sys.path:
+        sys.path.insert(0, str(app_root))
+
+    from flow.adapters import github_client as gh
+    from flow.domain.state import Modifier, State, parse_modifiers, parse_state
+    from flow.ports.issue_provider import ProviderError, ProviderNotFoundError
+
+    try:
+        item = gh.get_work_item(repo, str(issue_number))
+    except ProviderNotFoundError:
+        return {"ok": False, "error": f"issue #{issue_number} não encontrada em {repo!r}"}
+    except ProviderError as exc:
+        return {"ok": False, "error": f"erro ao acessar a issue: {exc}"}
+
+    current_labels = set(item.get("labels", []))
+    state = parse_state(current_labels)
+    modifiers = parse_modifiers(current_labels)
+
+    if state is not State.QA and Modifier.QA_FAIL not in modifiers:
+        return {
+            "ok": False,
+            "error": f"issue #{issue_number} não está em crewflow:qa (estado atual: {state})",
+        }
+
+    # Remove o estado crewflow:qa e adiciona o modificador crewflow:qa-fail.
+    # Preserva labels de tipo/prioridade e demais labels.
+    new_labels = set(current_labels)
+    new_labels.discard(State.QA.value)
+    new_labels.add(Modifier.QA_FAIL.value)
+
+    try:
+        gh.set_labels(repo, str(issue_number), sorted(new_labels))
+    except ProviderError as exc:
+        return {"ok": False, "error": f"erro ao aplicar crewflow:qa-fail: {exc}"}
+
+    reason_text = reason.strip() or "(motivo não informado)"
+    try:
+        gh.add_issue_comment(repo, issue_number, f"Reprovado no QA: {reason_text}")
+    except ProviderError as exc:
+        logger.warning(
+            "_apply_qa_fail: label trocada mas falha ao comentar motivo em %s#%s: %s",
+            repo, issue_number, exc,
+        )
+        return {
+            "ok": True,
+            "note": f"crewflow:qa-fail aplicado, mas falha ao registrar o motivo: {exc}",
+        }
+
+    logger.info("_apply_qa_fail: %s#%s → crewflow:qa-fail (motivo: %s)", repo, issue_number, reason_text)
+    return {"ok": True}
+
+
+async def handle_qa_approve(request: web.Request, ctx: object = None) -> web.Response:
+    """Aprova uma issue no QA (botão "Aprovar QA" da UI).
+
+    Body JSON: {"repo": "owner/repo", "number": 123}
+    Move a issue crewflow:qa para crewflow:done (a issue é fechada). Se a squad
+    tiver auto_merge_on_approve, o merge da PR ocorre no ciclo de merge.
+    Retorna {"ok": true}.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"ok": False, "error": "body JSON inválido"},
+            status=400,
+        )
+
+    repo = body.get("repo", "")
+    number = body.get("number")
+
+    if not repo or not number:
+        return web.json_response(
+            {"ok": False, "error": "campos 'repo' e 'number' são obrigatórios"},
+            status=400,
+        )
+
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        return web.json_response(
+            {"ok": False, "error": "'number' deve ser um inteiro"},
+            status=400,
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _apply_qa_approve, repo, number)
+        status = 200 if result.get("ok") else 400
+        return web.json_response(result, status=status)
+    except Exception as exc:
+        logger.exception("handle_qa_approve: erro inesperado: %s", exc)
+        return web.json_response(
+            {"ok": False, "error": str(exc)},
+            status=500,
+        )
+
+
+def _apply_qa_approve(repo: str, issue_number: int) -> dict:
+    """Aprova a issue no QA: crewflow:qa → crewflow:done (transição atômica de estado).
+
+    A issue é considerada concluída (o operador/cron fecha a issue via done). Se o
+    merge automático estiver ativo, o ciclo de merge cuida do PR — aqui apenas a
+    transição de estado é aplicada, consistente com as convenções do executor.
+    """
+    app_root = Path(__file__).parent.parent
+    if str(app_root) not in sys.path:
+        sys.path.insert(0, str(app_root))
+
+    from flow.adapters import github_client as gh
+    from flow.domain.state import Modifier, State, parse_state, transition_state
+    from flow.ports.issue_provider import ProviderError, ProviderNotFoundError
+
+    try:
+        item = gh.get_work_item(repo, str(issue_number))
+    except ProviderNotFoundError:
+        return {"ok": False, "error": f"issue #{issue_number} não encontrada em {repo!r}"}
+    except ProviderError as exc:
+        return {"ok": False, "error": f"erro ao acessar a issue: {exc}"}
+
+    current_labels = set(item.get("labels", []))
+    state = parse_state(current_labels)
+
+    if state is not State.QA:
+        return {
+            "ok": False,
+            "error": f"issue #{issue_number} não está em crewflow:qa (estado atual: {state})",
+        }
+
+    # Transição atômica → done, removendo qa-fail residual se presente.
+    new_labels = transition_state(current_labels, State.DONE) - {Modifier.QA_FAIL.value}
+
+    try:
+        gh.set_labels(repo, str(issue_number), sorted(new_labels))
+    except ProviderError as exc:
+        return {"ok": False, "error": f"erro ao mover para crewflow:done: {exc}"}
+
+    logger.info("_apply_qa_approve: %s#%s → crewflow:done", repo, issue_number)
+    return {"ok": True, "done": True}

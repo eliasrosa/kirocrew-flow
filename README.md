@@ -36,6 +36,7 @@ crewflow:spec → crewflow:ready → crewflow:todo → crewflow:dev → crewflow
 | `crewflow:hml-bypass` | Exceção auditada: hotfix pulou o HML (exige justificativa) |
 | `crewflow:changes-requested` | Reviewer pediu mudança — dev corrige na mesma PR e re-submete |
 | `crewflow:conflito` | PR com conflito de merge ou base desatualizada — cron resolve e atualiza a mesma branch |
+| `crewflow:qa-fail` | QA reprovou — o `run_dev` devolve a issue para `crewflow:todo`, fecha a PR atual e re-despacha o dev automaticamente com o motivo da reprovação |
 
 ### Tipo de fluxo (routing) e prioridade
 

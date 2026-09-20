@@ -83,4 +83,14 @@ Execute UMA vez, do início ao fim, e PARE:
 - Aplique APENAS os pedidos explícitos do reviewer. Nada além.
 - Se bloquear, marque `crewflow:blocked`, avise, e pare.
 
+### Nota: re-trabalho pós reprovação de QA
+
+Este fluxo cobre o re-trabalho pós-review (reviewer pediu mudanças na MESMA PR).
+Há um fluxo distinto quando o QA reprova depois do merge: o operador troca
+`crewflow:qa` por `crewflow:qa-fail` e registra o motivo como comentário
+`Reprovado no QA: <motivo>`. Nesse caso a issue NÃO volta para esta sessão de
+rework — ela volta para `crewflow:todo` e o cron `crewflow-dev` re-despacha uma
+sessão de dev normal (a PR atual é fechada, a correção gera uma NOVA PR). Essa
+sessão de dev recebe o motivo da reprovação no prompt via o comentário da issue.
+
 {{prompt_extra}}

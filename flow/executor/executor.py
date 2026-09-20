@@ -26,6 +26,7 @@ class ActionKind(StrEnum):
     DISPATCH_DEV              = "dispatch_dev"              # dispara sessão one-shot de implementação
     DISPATCH_REVIEWER         = "dispatch_reviewer"         # dispara kiro-reviewer
     DISPATCH_REWORK           = "dispatch_rework"           # dispara sessão dev de re-trabalho (pós-review com pedidos)
+    DISPATCH_QA_RETRY         = "dispatch_qa_retry"         # QA reprovou — volta a issue para todo e re-despacha dev
     DISPATCH_CONFLICT_RESOLVER = "dispatch_conflict_resolver"  # dispara sessão de resolução de conflito
     NOTIFY_HUMAN              = "notify_human"              # avisa humano (TL, QA, Dev)
     BLOCK                     = "block"                     # marca crewflow:blocked + motivo
@@ -229,6 +230,20 @@ def decide(
             reason="crewflow:conflito detectado — despachando sessão de resolução de conflito",
             add_labels=("crewflow:running",),
             remove_labels=("crewflow:conflito",),
+        )
+
+    # ── QA reprovou: crewflow:qa-fail ─────────────────────────────────
+    # Quando o QA reprova, o operador (via UI) troca crewflow:qa por
+    # crewflow:qa-fail. O motor detecta o modificador e devolve a issue para
+    # crewflow:todo: o driving adapter remove qa-fail/qa, fecha a PR atual com
+    # o motivo da reprovação e re-despacha uma sessão de dev com esse contexto.
+    # Detectado ANTES do dispatch por estado (o estado ainda é crewflow:qa).
+    if Modifier.QA_FAIL in modifiers:
+        return ExecutorDecision(
+            action=ActionKind.DISPATCH_QA_RETRY,
+            reason="crewflow:qa-fail detectado — QA reprovou; devolvendo issue para crewflow:todo e re-despachando dev",
+            add_labels=("crewflow:todo",),
+            remove_labels=("crewflow:qa-fail", "crewflow:qa"),
         )
 
     # ── Ciclo de re-trabalho pós-review: crewflow:review-fail ─────────

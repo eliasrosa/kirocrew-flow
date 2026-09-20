@@ -678,3 +678,35 @@ class TestReviewOkReviewFail:
         )
         d = decide(r, state_comment=None)
         assert d.action is ActionKind.DISPATCH_REWORK
+
+
+# ---------------------------------------------------------------------------
+# decide() — QA reprovou (crewflow:qa-fail)
+# ---------------------------------------------------------------------------
+
+class TestQaFailCycle:
+    def _result_qa_fail(self) -> ScanResult:
+        return _result(
+            state=State.QA,
+            labels=["crewflow:qa", "crewflow:qa-fail", "crewflow:feature"],
+            modifiers={Modifier.QA_FAIL},
+        )
+
+    def test_qa_fail_despacha_qa_retry(self) -> None:
+        """QA_FAIL → DISPATCH_QA_RETRY."""
+        d = decide(self._result_qa_fail(), state_comment=None)
+        assert d.action is ActionKind.DISPATCH_QA_RETRY
+
+    def test_qa_fail_add_todo_remove_qa_fail_e_qa(self) -> None:
+        """QA_FAIL: adiciona crewflow:todo, remove crewflow:qa-fail e crewflow:qa."""
+        d = decide(self._result_qa_fail(), state_comment=None)
+        assert "crewflow:todo" in d.add_labels
+        assert "crewflow:qa-fail" in d.remove_labels
+        assert "crewflow:qa" in d.remove_labels
+
+    def test_qa_puro_ainda_notifica_qa(self) -> None:
+        """crewflow:qa sem qa-fail mantém o comportamento NOTIFY_HUMAN QA."""
+        r = _result(state=State.QA, labels=["crewflow:qa", "crewflow:feature"])
+        d = decide(r, state_comment=None)
+        assert d.action is ActionKind.NOTIFY_HUMAN
+        assert d.notify_role is HumanRole.QA

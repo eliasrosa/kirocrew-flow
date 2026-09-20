@@ -153,6 +153,7 @@ class TestRealTemplates:
             notify_step="reporte o resultado, ",
             vault_step="",
             prompt_extra="",
+            qa_fail_context="",
         )
         assert "owner/myrepo" in result
         assert "#42" in result
@@ -175,6 +176,7 @@ class TestRealTemplates:
             notify_step="reporte o resultado, ",
             vault_step="",
             prompt_extra="",
+            qa_fail_context="",
         )
         assert "/home/dev/.esteira-worktrees/myrepo-99" in result
 
@@ -192,6 +194,7 @@ class TestRealTemplates:
             notify_step="reporte o resultado, ",
             vault_step="   - VAULT: edite /vault/backlog.md",
             prompt_extra="",
+            qa_fail_context="",
         )
         assert "VAULT" in result
 
@@ -209,8 +212,28 @@ class TestRealTemplates:
             notify_step="reporte o resultado, ",
             vault_step="",
             prompt_extra="instrução extra aqui",
+            qa_fail_context="",
         )
         assert "instrução extra aqui" in result
+
+    def test_dev_template_real_com_qa_fail_context(self) -> None:
+        """O contexto de reprovação de QA é injetado no prompt do dev quando presente."""
+        result = render_prompt(
+            "dev",
+            repo="owner/myrepo",
+            repo_short="myrepo",
+            issue_number="1",
+            issue_title="T",
+            issue_url="https://github.com/owner/myrepo/issues/1",
+            session_title="myrepo #1: T",
+            dev_root="/home/dev",
+            worktree_path="/home/dev/.esteira-worktrees/myrepo-1",
+            notify_step="reporte o resultado, ",
+            vault_step="",
+            prompt_extra="",
+            qa_fail_context="Reprovado no QA: layout quebrado no mobile",
+        )
+        assert "Reprovado no QA: layout quebrado no mobile" in result
 
     def test_dev_template_real_le_comentarios_da_issue(self) -> None:
         """Passo 1 (CONTEXTO) deve instruir a leitura dos comentários da issue."""
@@ -227,6 +250,7 @@ class TestRealTemplates:
             notify_step="reporte o resultado, ",
             vault_step="",
             prompt_extra="",
+            qa_fail_context="",
         )
         assert "gh issue view 42 --repo owner/myrepo --comments" in result
 

@@ -31,7 +31,7 @@ from backend.hooks import on_shutdown, on_startup  # noqa: E402
 from backend.routes import register_routes  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# register_routes(ctx) -> list[AppRoute] — contrato fixo (3 rotas)
+# register_routes(ctx) -> list[AppRoute] — contrato fixo (5 rotas)
 # ---------------------------------------------------------------------------
 
 
@@ -41,8 +41,8 @@ class TestRegisterRoutesContract:
         assert isinstance(result, list)
         return result
 
-    def test_returns_exactly_three_routes(self) -> None:
-        assert len(self._routes()) == 3
+    def test_returns_exactly_five_routes(self) -> None:
+        assert len(self._routes()) == 5
 
     def test_exact_method_path_pairs(self) -> None:
         pairs = {(r.method, r.path) for r in self._routes()}
@@ -50,6 +50,8 @@ class TestRegisterRoutesContract:
             ("GET", "/health"),
             ("GET", "/issues"),
             ("POST", "/dispatch"),
+            ("POST", "/qa-fail"),
+            ("POST", "/qa-approve"),
         }
 
     def test_handlers_are_callable(self) -> None:

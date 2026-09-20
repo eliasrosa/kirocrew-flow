@@ -9,6 +9,7 @@
 
 ## Contexto da task
 Você é um agente de implementação ONE-SHOT. Tarefa ÚNICA, sem loop, sem watchdog.
+{{qa_fail_context}}
 
 ### Fluxo
 

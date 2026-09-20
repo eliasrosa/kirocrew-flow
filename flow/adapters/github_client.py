@@ -139,6 +139,16 @@ def merge_pull_request(project: str, pr_number: int, merge_method: str = "squash
     return transport.merge_pull_request(project, pr_number, merge_method=merge_method)
 
 
+def close_pull_request(project: str, pr_number: int, comment: str | None = None) -> None:
+    """Fecha um PR (sem merge), opcionalmente postando um comentário.
+
+    Usado no fluxo qa-fail: a correção da reprovação gera uma nova PR, então a
+    PR atual é fechada com o motivo. Silencioso se a PR não existir/já estiver
+    fechada.
+    """
+    transport.close_pull_request(project, pr_number, comment=comment)
+
+
 def upsert_pr_review_comment(project: str, pr_number: int, body: str) -> None:
     """Cria ou atualiza o comentário <!-- KIRO-FLOW-REVIEW --> no PR.
 
@@ -203,6 +213,12 @@ def add_issue_comment(project: str, issue_number: int, body: str) -> dict:
     """Adiciona um comentário a uma issue."""
     from flow.adapters import github_transport as _t
     return _t.create_issue_comment(project, issue_number, body)
+
+
+def get_issue_comments(project: str, issue_number: int) -> list:
+    """Retorna os comentários de uma issue."""
+    from flow.adapters import github_transport as _t
+    return _t.get_issue_comments(project, issue_number)
 
 
 def get_branch_exists(project: str, branch: str) -> bool:

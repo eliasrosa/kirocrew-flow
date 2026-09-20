@@ -47,6 +47,20 @@ class TestStateConstants:
         """review-fail é resultado de review, não impede dispatch de TODO."""
         assert Modifier.REVIEW_FAIL not in STOP_MODIFIERS
 
+    def test_qa_fail_nao_e_stop_modifier(self) -> None:
+        """qa-fail é resultado de QA — devolve a issue para dev, não impede dispatch."""
+        assert Modifier.QA_FAIL not in STOP_MODIFIERS
+
+    def test_qa_fail_e_um_modifier_nao_um_state(self) -> None:
+        """crewflow:qa-fail é modelado como Modifier, não como State."""
+        assert Modifier.QA_FAIL.value == "crewflow:qa-fail"
+        assert "crewflow:qa-fail" not in {s.value for s in State}
+
+    def test_parse_modifiers_reconhece_qa_fail(self) -> None:
+        """parse_modifiers pega crewflow:qa-fail automaticamente."""
+        mods = parse_modifiers({"crewflow:qa", "crewflow:qa-fail"})
+        assert Modifier.QA_FAIL in mods
+
     def test_valores_das_labels_tem_prefixo_crewflow(self) -> None:
         for s in State:
             assert s.value.startswith("crewflow:"), s

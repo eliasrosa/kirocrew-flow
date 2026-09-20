@@ -78,6 +78,7 @@ sobrepostos. **Modificador de parada tem prioridade sobre o estado.**
 | `crewflow:conflito` | 🟠 `#F97316` | PR com conflito de merge ou base desatualizada — **cron de conflito resolve via rebase na mesma branch** |
 | `crewflow:review-ok` | 🟩 `#22C55E` | reviewer aprovou — **pronto para merge** (1 label, sem combinação) |
 | `crewflow:review-fail` | 🔴 `#DC2626` | reviewer reprovou — **aguarda rework** (1 label, sem combinação) |
+| `crewflow:qa-fail` | 🔴 `#DC2626` | QA reprovou — o operador troca `crewflow:qa` por esta label; o `run_dev` devolve a issue para `crewflow:todo`, fecha a PR atual e **re-despacha o dev automaticamente** com o motivo da reprovação |
 
 ### Tipo de fluxo (routing) e prioridade
 
@@ -121,7 +122,7 @@ Em vez de um único cron monolítico (`run`), a esteira pode ser dividida em
 
 | Entrypoint | Estado alvo | Ação | Intervalo recomendado |
 |---|---|---|---|
-| `run_dev` | `crewflow:todo` | `DISPATCH_DEV` — implementa + abre PR | 600s (10 min) |
+| `run_dev` | `crewflow:todo` (ou `crewflow:qa-fail`) | `DISPATCH_DEV` — implementa + abre PR / `DISPATCH_QA_RETRY` — QA reprovou: devolve para `todo`, fecha a PR atual e re-despacha o dev | 600s (10 min) |
 | `run_reviewer` | `crewflow:review` (sem `crewflow:reviewed`) | `DISPATCH_REVIEWER` — code review | 300s (5 min) |
 | `run_merge` | `crewflow:review-ok` | `MERGE_PR` — merge squash | 120s (2 min) |
 | `run_conflito` | `crewflow:review-fail` ou `crewflow:conflito` | `DISPATCH_REWORK` (re-trabalho pós-review) / `DISPATCH_CONFLICT_RESOLVER` (conflito de merge) | 300s (5 min) |
@@ -147,6 +148,21 @@ iniciar a análise (lock interno). Quando o review termina, substitui `review` p
 Se a label `crewflow:reviewed` já estiver sem resultado correspondente, o executor
 aguarda. Quando o dev faz um novo push, a label é removida e a próxima varredura
 dispara nova análise.
+
+### QA reprovou (crewflow:qa-fail)
+
+Depois do merge, a issue segue para `crewflow:qa` (validação em HML pelo QA). O QA
+pode **aprovar** (a issue vai para `crewflow:done`) ou **reprovar**. Na reprovação,
+o operador troca `crewflow:qa` por `crewflow:qa-fail` (botão "Reprovar QA" na UI) e o
+motivo é registrado como comentário `Reprovado no QA: <motivo>`. O `run_dev` detecta
+`crewflow:qa-fail` e automaticamente:
+
+1. Devolve a issue para `crewflow:todo` (remove `crewflow:qa-fail` e `crewflow:qa`)
+2. Fecha a PR atual com o comentário `Reprovado no QA: <motivo>` (a correção gera uma **nova** PR)
+3. Posta um comentário na issue com o contexto da reprovação
+4. Re-despacha uma sessão de dev que recebe o motivo no prompt
+
+Fluxo completo: `dev → review → review-ok → qa → (aprovado: done/merge | reprovado: todo)`.
 
 ## Travas de segurança
 

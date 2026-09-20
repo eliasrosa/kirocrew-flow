@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# KiroCrew Flow — aplica as 19 labels do padrão `crewflow:*` num repo (idempotente via --force).
+# KiroCrew Flow — aplica as 20 labels do padrão `crewflow:*` num repo (idempotente via --force).
 # Uso: ./scripts/setup-labels.sh owner/repo [owner/repo ...]
 #
 # O prefixo `crewflow:` funciona em GitHub e Jira. Confluence NÃO aceita `:`
@@ -47,6 +47,9 @@ LABELS=(
   #   review-fail = reviewer reprovou, aguarda rework  (substitui review+changes-requested)
   "crewflow:review-ok|22C55E|Reviewer aprovou — pronto para merge"
   "crewflow:review-fail|DC2626|Reviewer reprovou — aguarda rework"
+  # QA reprovou: o operador troca crewflow:qa por crewflow:qa-fail; o cron dev
+  # detecta, devolve a issue para crewflow:todo, fecha a PR atual e re-despacha.
+  "crewflow:qa-fail|DC2626|QA reprovou — volta para dev (todo) com dispatch automatico"
 
   # ── TIPO DE FLUXO (routing: define qual workflow aplicar) ────────────
   "crewflow:feature|A855F7|Feature nova"

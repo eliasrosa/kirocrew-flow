@@ -38,6 +38,8 @@ from backend.routes import (  # noqa: E402
     handle_dispatch,
     handle_health,
     handle_issues,
+    handle_qa_approve,
+    handle_qa_fail,
     register_routes,
 )
 
@@ -109,9 +111,19 @@ class TestRegisterRoutes:
         methods_paths = {(r.method, r.path) for r in routes}
         assert ("POST", "/dispatch") in methods_paths
 
-    def test_three_explicit_routes(self) -> None:
+    def test_registers_qa_fail_route(self) -> None:
         routes = self._get_routes()
-        assert len(routes) == 3, f"esperado 3 rotas, obtido {len(routes)}"
+        methods_paths = {(r.method, r.path) for r in routes}
+        assert ("POST", "/qa-fail") in methods_paths
+
+    def test_registers_qa_approve_route(self) -> None:
+        routes = self._get_routes()
+        methods_paths = {(r.method, r.path) for r in routes}
+        assert ("POST", "/qa-approve") in methods_paths
+
+    def test_five_explicit_routes(self) -> None:
+        routes = self._get_routes()
+        assert len(routes) == 5, f"esperado 5 rotas, obtido {len(routes)}"
 
     def test_handlers_are_callable(self) -> None:
         routes = self._get_routes()
@@ -181,7 +193,7 @@ class TestHandleIssues:
 
     def test_returns_all_column_keys(self) -> None:
         body = self._run_with_mock_loader(_empty_columns())
-        for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "reviewed", "done", "blocked"):
+        for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "reviewed", "qa", "qa_fail", "done", "blocked"):
             assert key in body["columns"], f"coluna '{key}' ausente no retorno"
 
     def test_returns_issues_in_correct_column(self) -> None:
@@ -204,7 +216,7 @@ class TestHandleIssues:
             response = loop.run_until_complete(handle_issues(_make_request()))
         body = _parse_body(response)
         assert "columns" in body
-        for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "reviewed", "done", "blocked"):
+        for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "reviewed", "qa", "qa_fail", "done", "blocked"):
             assert body["columns"][key] == []
 
     def test_status_500_on_error(self) -> None:
@@ -296,6 +308,124 @@ class TestHandleDispatch:
 
 
 # ---------------------------------------------------------------------------
+# Tests: handle_qa_fail — "Reprovar QA"
+# ---------------------------------------------------------------------------
+
+
+class TestHandleQaFail:
+    def test_returns_400_on_missing_body_fields(self) -> None:
+        req = _make_request(body={})
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_fail(req))
+        assert response.status == 400  # type: ignore[attr-defined]
+        body = _parse_body(response)
+        assert body["ok"] is False
+
+    def test_returns_400_on_invalid_number(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": "nan", "reason": "x"})
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_fail(req))
+        assert response.status == 400  # type: ignore[attr-defined]
+
+    def test_returns_400_on_invalid_json(self) -> None:
+        req = _make_request(body=None)
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_fail(req))
+        assert response.status == 400  # type: ignore[attr-defined]
+
+    def test_calls_worker_with_repo_number_reason(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": 42, "reason": "layout quebrado"})
+        with mock.patch(
+            "backend.routes._apply_qa_fail",
+            return_value={"ok": True},
+        ) as mock_worker:
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_qa_fail(req))
+        mock_worker.assert_called_once_with("owner/repo", 42, "layout quebrado")
+        body = _parse_body(response)
+        assert body["ok"] is True
+
+    def test_returns_200_on_success(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": 1, "reason": "bug"})
+        with mock.patch("backend.routes._apply_qa_fail", return_value={"ok": True}):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_qa_fail(req))
+        assert response.status == 200  # type: ignore[attr-defined]
+
+    def test_returns_400_when_worker_reports_not_ok(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": 1, "reason": "bug"})
+        with mock.patch(
+            "backend.routes._apply_qa_fail",
+            return_value={"ok": False, "error": "não está em crewflow:qa"},
+        ):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_qa_fail(req))
+        assert response.status == 400  # type: ignore[attr-defined]
+
+    def test_returns_500_on_worker_exception(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": 1, "reason": "bug"})
+        with mock.patch(
+            "backend.routes._apply_qa_fail",
+            side_effect=RuntimeError("boom"),
+        ):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_qa_fail(req))
+        assert response.status == 500  # type: ignore[attr-defined]
+        body = _parse_body(response)
+        assert body["ok"] is False
+
+    def test_reason_defaults_to_empty_when_absent(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": 7})
+        with mock.patch(
+            "backend.routes._apply_qa_fail",
+            return_value={"ok": True},
+        ) as mock_worker:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(handle_qa_fail(req))
+        mock_worker.assert_called_once_with("owner/repo", 7, "")
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_qa_approve — "Aprovar QA"
+# ---------------------------------------------------------------------------
+
+
+class TestHandleQaApprove:
+    def test_returns_400_on_missing_body_fields(self) -> None:
+        req = _make_request(body={})
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_approve(req))
+        assert response.status == 400  # type: ignore[attr-defined]
+
+    def test_returns_400_on_invalid_number(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": "nan"})
+        loop = asyncio.get_event_loop()
+        response = loop.run_until_complete(handle_qa_approve(req))
+        assert response.status == 400  # type: ignore[attr-defined]
+
+    def test_calls_worker_with_repo_number(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": 42})
+        with mock.patch(
+            "backend.routes._apply_qa_approve",
+            return_value={"ok": True, "done": True},
+        ) as mock_worker:
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_qa_approve(req))
+        mock_worker.assert_called_once_with("owner/repo", 42)
+        assert response.status == 200  # type: ignore[attr-defined]
+
+    def test_returns_500_on_worker_exception(self) -> None:
+        req = _make_request(body={"repo": "owner/repo", "number": 1})
+        with mock.patch(
+            "backend.routes._apply_qa_approve",
+            side_effect=RuntimeError("boom"),
+        ):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_qa_approve(req))
+        assert response.status == 500  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
 # Tests: helpers
 # ---------------------------------------------------------------------------
 
@@ -336,9 +466,9 @@ class TestStateToColumn:
         from flow.domain.state import State
         assert _state_to_column(State.REVIEW) == "review"
 
-    def test_qa_maps_to_reviewed(self) -> None:
+    def test_qa_maps_to_qa(self) -> None:
         from flow.domain.state import State
-        assert _state_to_column(State.QA) == "review_ok"
+        assert _state_to_column(State.QA) == "qa"
 
     def test_done_maps_to_done(self) -> None:
         from flow.domain.state import State
@@ -367,7 +497,7 @@ class TestRepoFromKey:
 class TestEmptyColumns:
     def test_has_all_required_keys(self) -> None:
         cols = _empty_columns()
-        for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "reviewed", "done", "blocked"):
+        for key in ("spec", "ready", "todo", "dev", "review", "review_ok", "reviewed", "qa", "qa_fail", "done", "blocked"):
             assert key in cols
 
     def test_all_values_are_empty_lists(self) -> None:

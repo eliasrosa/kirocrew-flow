@@ -252,6 +252,80 @@ class TestRunDev:
 
 
 # ---------------------------------------------------------------------------
+# run_dev — processa DISPATCH_QA_RETRY (issues crewflow:qa + crewflow:qa-fail)
+# ---------------------------------------------------------------------------
+
+class TestRunDevQaFail:
+    def _qa_fail_result(self) -> object:
+        return _make_scan_result("crewflow:qa", ["crewflow:qa-fail", "crewflow:feature"])
+
+    def test_qa_fail_transiciona_para_todo_e_redispacha(self) -> None:
+        """run_dev processa qa-fail: set_labels → todo (sem qa/qa-fail), fecha PR e re-despacha dev."""
+        ctx = _make_ctx()
+        result = self._qa_fail_result()
+
+        provider = mock.MagicMock()
+        provider.get_work_item.return_value = {
+            "labels": ["crewflow:qa", "crewflow:qa-fail", "crewflow:feature"],
+        }
+
+        with (
+            mock.patch("deployment.deployment._load_config", return_value=_base_config()),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for", return_value=provider),
+            mock.patch("deployment.deployment._active_sessions", return_value=0),
+            mock.patch("deployment.deployment._extract_qa_fail_reason", return_value="layout quebrado"),
+            mock.patch("deployment.deployment.subprocess.run") as mock_sub,
+            mock.patch("flow.adapters.github_client.close_pull_request") as mock_close_gh,
+            mock.patch("flow.adapters.github_client.add_issue_comment"),
+            mock.patch("deployment.deployment._dispatch") as mock_dispatch,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            # gh pr list retorna uma PR aberta
+            mock_sub.return_value = mock.MagicMock(returncode=0, stdout='[{"number": 7}]')
+            run_dev(ctx)
+
+        # set_labels chamado com crewflow:todo e sem qa/qa-fail
+        provider.set_labels.assert_called()
+        applied = provider.set_labels.call_args[0][2]
+        assert "crewflow:todo" in applied
+        assert "crewflow:qa" not in applied
+        assert "crewflow:qa-fail" not in applied
+        # PR fechada e dev re-despachado com contexto de qa-fail
+        assert mock_close_gh.called
+        mock_dispatch.assert_called_once()
+        kwargs = mock_dispatch.call_args.kwargs
+        assert "layout quebrado" in kwargs.get("qa_fail_context", "")
+
+    def test_qa_fail_auto_false_apenas_notifica(self) -> None:
+        """run_dev com auto_dispatch=false não transiciona — só notifica."""
+        ctx = _make_ctx()
+        result = self._qa_fail_result()
+        provider = mock.MagicMock()
+
+        with (
+            mock.patch("deployment.deployment._load_config",
+                       return_value=_base_config(auto_dispatch=False)),
+            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
+            mock.patch("deployment.deployment.open_cache") as mock_cache,
+            mock.patch("deployment.deployment.provider_for", return_value=provider),
+            mock.patch("deployment.deployment._process_qa_retry") as mock_proc,
+            mock.patch("deployment.deployment._dispatch") as mock_dispatch,
+        ):
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            run_dev(ctx)
+
+        mock_proc.assert_not_called()
+        mock_dispatch.assert_not_called()
+        ctx.notify.assert_called()
+
+
+# ---------------------------------------------------------------------------
 # run_reviewer — só despacha DISPATCH_REVIEWER (issues crewflow:review)
 # ---------------------------------------------------------------------------
 
