@@ -17,7 +17,9 @@
     ],
     "backend": {
         "hooks": {
-            "routes": "backend.routes:register_routes"
+            "routes": "backend.routes:register_routes",
+            "on_startup": "backend.hooks:on_startup",
+            "on_shutdown": "backend.hooks:on_shutdown"
         }
     },
     "ui": {

@@ -48,6 +48,30 @@ class TestAppJsonManifest:
             "lê apenas 'backend.hooks.routes'."
         )
 
+    def test_backend_hooks_lifecycle_declared(self) -> None:
+        """on_startup e on_shutdown devem ser declarados sob backend.hooks.
+
+        O gateway (kiro_crew/apps/lifecycle.py) invoca esses hooks como
+        ``func(ctx)`` quando o app é habilitado/desabilitado. Sem eles
+        declarados, os 4 loops de polling da esteira nunca sobem sob o gateway.
+        Ref: issue #170.
+        """
+        manifest = _load_manifest()
+        hooks = manifest.get("backend", {}).get("hooks", {})
+        assert hooks.get("on_startup"), (
+            "app.json deve declarar 'backend.hooks.on_startup' apontando para o "
+            "callable de startup (ex.: 'backend.hooks:on_startup')."
+        )
+        assert hooks.get("on_shutdown"), (
+            "app.json deve declarar 'backend.hooks.on_shutdown' apontando para o "
+            "callable de shutdown (ex.: 'backend.hooks:on_shutdown')."
+        )
+        for key in ("on_startup", "on_shutdown"):
+            assert ":" in hooks[key], (
+                f"backend.hooks.{key} deve estar no formato 'module.path:callable_name', "
+                f"obtido: {hooks[key]!r}"
+            )
+
     def test_backend_hooks_routes_format(self) -> None:
         """backend.hooks.routes deve estar no formato 'module.path:callable_name'."""
         manifest = _load_manifest()
