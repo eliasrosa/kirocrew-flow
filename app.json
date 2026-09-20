@@ -16,7 +16,9 @@
         "agents/crewflow-merge.json"
     ],
     "backend": {
-        "routes": "backend.routes:register_routes"
+        "hooks": {
+            "routes": "backend.routes:register_routes"
+        }
     },
     "ui": {
         "entry": "dist/index.mjs",
