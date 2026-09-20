@@ -5,6 +5,9 @@ config.yaml
 state/
 *.state.json
 
+# UI (Vite/React). ui/dist/index.mjs É versionado (o Crew serve o bundle).
+ui/node_modules/
+
 # Python
 __pycache__/
 *.pyc
