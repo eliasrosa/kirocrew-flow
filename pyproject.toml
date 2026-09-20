@@ -9,12 +9,14 @@ description = "KiroCrew Flow — orquestração de esteira de desenvolvimento mu
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9",
-    "kirocrew-client",  # SDK do Crew Gateway — necessário para o backend subir via gateway
 ]
 
 [project.optional-dependencies]
 yaml = [
     "pyyaml>=6.0",  # parser YAML completo; recomendado para squads com routing complexo
+]
+gateway = [
+    "kirocrew-client>=0.1",  # SDK do Crew Gateway — instalado só no ambiente do gateway; ausente no PyPI público, por isso fora do dev/CI
 ]
 dev = [
     "pytest>=8.0",
