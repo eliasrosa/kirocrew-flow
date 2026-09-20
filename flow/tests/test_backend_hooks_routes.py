@@ -4,8 +4,8 @@ Critérios de aceite (issue #155, iteração 1):
 - register_routes(app) usa app.router.add_get/add_post (não duck-typing)
 - register_routes registra on_startup e on_cleanup no app
 - handle_health retorna {"ok": true, "app": "kirocrew-flow", "version": "1.0.0"}
-- handle_issues retorna {"issues": [], "note": "TODO Fase 4"}
-- handle_dispatch retorna {"ok": true, "note": "TODO Fase 4"}
+- handle_issues retorna {"columns": {...}} com as seis colunas da esteira (Fase 4)
+- handle_dispatch (body válido) retorna {"ok": true, "dispatched": true} (Fase 4)
 - _start_loops cria 4 tasks asyncio e imprime log
 - _stop_loops cancela tasks e limpa a lista
 """
@@ -130,19 +130,56 @@ class TestHandleHealth:
 # ---------------------------------------------------------------------------
 
 
-class TestHandleIssues:
-    def test_returns_empty_issues_list(self) -> None:
-        loop = asyncio.get_event_loop()
-        response = loop.run_until_complete(handle_issues(_make_request()))
-        body = _parse_body(response)
-        assert body["issues"] == []
+_COLUMN_KEYS = ("todo", "dev", "review", "reviewed", "done", "blocked")
 
-    def test_returns_todo_note(self) -> None:
-        loop = asyncio.get_event_loop()
-        response = loop.run_until_complete(handle_issues(_make_request()))
+
+class TestHandleIssues:
+    """handle_issues agora retorna {"columns": {...}} da orquestração real.
+
+    Patcha backend.routes.issues_mod.collect_columns para não tocar a rede;
+    o handler ainda roda o caminho real (run_in_executor + json_response).
+    """
+
+    def test_returns_columns_key(self) -> None:
+        fake_columns = {key: [] for key in _COLUMN_KEYS}
+        with mock.patch(
+            "backend.routes.issues_mod.collect_columns", return_value=fake_columns
+        ):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_issues(_make_request()))
         body = _parse_body(response)
-        assert "note" in body
-        assert "TODO" in body["note"]
+        assert "columns" in body
+        assert set(body["columns"].keys()) == set(_COLUMN_KEYS)
+
+    def test_columns_carry_collected_cards(self) -> None:
+        card = {
+            "number": 7,
+            "title": "[gw] Fix",
+            "repo": "owner/repo",
+            "url": "https://github.com/owner/repo/issues/7",
+            "age_min": 0,
+        }
+        fake_columns = {key: [] for key in _COLUMN_KEYS}
+        fake_columns["dev"] = [card]
+        with mock.patch(
+            "backend.routes.issues_mod.collect_columns", return_value=fake_columns
+        ):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_issues(_make_request()))
+        body = _parse_body(response)
+        assert body["columns"]["dev"] == [card]
+
+    def test_degrades_to_empty_columns_on_error(self) -> None:
+        """Erro na coleta degrada para colunas vazias (HTTP 200), nunca 500."""
+        with mock.patch(
+            "backend.routes.issues_mod.collect_columns",
+            side_effect=RuntimeError("boom"),
+        ):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_issues(_make_request()))
+        assert response.status == 200
+        body = _parse_body(response)
+        assert body["columns"] == {key: [] for key in _COLUMN_KEYS}
 
 
 # ---------------------------------------------------------------------------
@@ -150,19 +187,68 @@ class TestHandleIssues:
 # ---------------------------------------------------------------------------
 
 
-class TestHandleDispatch:
-    def test_returns_ok_true(self) -> None:
-        loop = asyncio.get_event_loop()
-        response = loop.run_until_complete(handle_dispatch(_make_request()))
-        body = _parse_body(response)
-        assert body["ok"] is True
+def _make_json_request(payload: object, raise_on_json: bool = False) -> mock.MagicMock:
+    """Request mock com .json() awaitable (o handler faz `await request.json()`)."""
+    request = mock.MagicMock()
 
-    def test_returns_todo_note(self) -> None:
-        loop = asyncio.get_event_loop()
-        response = loop.run_until_complete(handle_dispatch(_make_request()))
+    async def _json() -> object:
+        if raise_on_json:
+            raise ValueError("corpo JSON inválido")
+        return payload
+
+    request.json = _json
+    return request
+
+
+class TestHandleDispatch:
+    def test_valid_body_returns_dispatched(self) -> None:
+        request = _make_json_request({"repo": "owner/repo", "number": 42})
+        with mock.patch(
+            "backend.routes.dispatch_mod.ensure_todo"
+        ) as ensure_m, mock.patch(
+            "backend.routes.dispatch_mod.run_dev_stage"
+        ) as run_m:
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_dispatch(request))
         body = _parse_body(response)
-        assert "note" in body
-        assert "TODO" in body["note"]
+        assert body == {"ok": True, "dispatched": True}
+        ensure_m.assert_called_once_with("owner/repo", 42)
+        run_m.assert_called_once_with()
+
+    def test_invalid_json_returns_400(self) -> None:
+        request = _make_json_request(None, raise_on_json=True)
+        with mock.patch("backend.routes.dispatch_mod.run_dev_stage") as run_m:
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_dispatch(request))
+        assert response.status == 400
+        body = _parse_body(response)
+        assert body["ok"] is False
+        assert "error" in body
+        run_m.assert_not_called()
+
+    def test_missing_repo_returns_400(self) -> None:
+        request = _make_json_request({"number": 42})
+        with mock.patch("backend.routes.dispatch_mod.run_dev_stage") as run_m:
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_dispatch(request))
+        assert response.status == 400
+        body = _parse_body(response)
+        assert body["ok"] is False
+        run_m.assert_not_called()
+
+    def test_provider_error_returns_502(self) -> None:
+        from flow.ports.issue_provider import ProviderError
+
+        request = _make_json_request({"repo": "owner/repo", "number": 42})
+        with mock.patch(
+            "backend.routes.dispatch_mod.ensure_todo",
+            side_effect=ProviderError("gh não autenticado"),
+        ), mock.patch("backend.routes.dispatch_mod.run_dev_stage"):
+            loop = asyncio.get_event_loop()
+            response = loop.run_until_complete(handle_dispatch(request))
+        assert response.status == 502
+        body = _parse_body(response)
+        assert body["ok"] is False
 
 
 # ---------------------------------------------------------------------------
