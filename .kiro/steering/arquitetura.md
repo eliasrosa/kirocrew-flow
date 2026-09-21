@@ -256,17 +256,17 @@ Os prompts das sessões one-shot (dev e reviewer) vivem em arquivos MD editávei
 |---|---|---|
 | `dev.md` | implementação inicial | `DISPATCH_DEV` — issue em `flow:develop-waiting` |
 | `reviewer.md` | code review | `DISPATCH_REVIEWER` — issue em `flow:review-waiting` |
-| `rework.md` | re-trabalho pós-review | `DISPATCH_REWORK` — issue com `flow:review-waiting-fail` |
+| `rework.md` | re-trabalho pós-review | `DISPATCH_REWORK` — issue com `flow:review-refused` |
 | `conflict.md` | resolução de conflito | `DISPATCH_CONFLICT_RESOLVER` — issue com `crewflow:conflito` |
 
-### Ciclo de re-trabalho (flow:review-waiting-fail)
+### Ciclo de re-trabalho (flow:review-refused)
 
-Quando o reviewer reprova, o motor adiciona `flow:review-waiting-fail` à issue (removendo
+Quando o reviewer reprova, o motor adiciona `flow:review-refused` à issue (removendo
 `flow:review-waiting` e `crewflow:reviewed`) e despacha uma sessão `rework` que:
 1. Lê os pedidos de mudança nos comentários do PR
 2. Aplica as correções na **mesma branch/PR** (nunca cria PR novo)
 3. Commita e faz push (o novo SHA invalida `crewflow:reviewed` automaticamente)
-4. Volta a issue para `flow:review-waiting` (remove `flow:review-waiting-fail`)
+4. Volta a issue para `flow:review-waiting` (remove `flow:review-refused`)
 
 Quando o reviewer aprova, o motor adiciona `flow:review-waiting-ok` (removendo
 `flow:review-waiting` e `crewflow:reviewed`). O cron `run_merge` lê `review-ok`
