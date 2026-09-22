@@ -28,7 +28,12 @@ import pytest
 # Caminhos canônicos
 _REPO_ROOT = Path(__file__).parent.parent.parent
 _PROMPTS_DIR = _REPO_ROOT / "flow" / "prompts"
-_DEPLOYMENT_PY = _REPO_ROOT / "deployment" / "deployment.py"
+# O código de dispatch (chamadas render_prompt(...) e as constantes de fallback
+# _DEV_PROMPT_FALLBACK / _REWORK_PROMPT_FALLBACK / _CONFLICT_PROMPT_FALLBACK)
+# foi movido do antigo deployment/deployment.py monolítico para o módulo comum
+# do pacote refatorado deployment/flow/base.py. O teste AST-parseia essa nova
+# fonte autoritativa; as asserções e a cobertura por estágio permanecem iguais.
+_DEPLOYMENT_PY = _REPO_ROOT / "deployment" / "flow" / "base.py"
 
 # Regex para placeholders {{variavel}} nos templates
 _PLACEHOLDER_RE = re.compile(r"\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}")
