@@ -38,28 +38,59 @@
     },
     "crons": [
         {
-            "name": "crewflow-dev",
+            "name": "flow-develop-waiting",
+            "script": "deployment/flow/dev.py:run",
             "every": 300,
-            "message": "crewflow: trigger dev stage",
-            "enabled": false
+            "enabled": true
         },
         {
-            "name": "crewflow-reviewer",
+            "name": "flow-review-waiting",
+            "script": "deployment/flow/reviewer.py:run",
             "every": 180,
-            "message": "crewflow: trigger reviewer stage",
-            "enabled": false
+            "enabled": true
         },
         {
-            "name": "crewflow-merge",
+            "name": "flow-review-approved",
+            "script": "deployment/flow/review_approved.py:run",
             "every": 120,
-            "message": "crewflow: trigger merge stage",
-            "enabled": false
+            "enabled": true
         },
         {
-            "name": "crewflow-conflito",
+            "name": "flow-review-refused",
+            "script": "deployment/flow/rework.py:run",
+            "every": 3600,
+            "enabled": true
+        },
+        {
+            "name": "flow-merge-conflict",
+            "script": "deployment/flow/conflict.py:run",
             "every": 300,
-            "message": "crewflow: trigger conflito stage",
-            "enabled": false
+            "enabled": true
+        },
+        {
+            "name": "flow-qa-waiting",
+            "script": "deployment/flow/qa_notify.py:run",
+            "every": 600,
+            "enabled": true
+        },
+        {
+            "name": "flow-qa-approved",
+            "script": "deployment/flow/qa_approved.py:run",
+            "every": 120,
+            "enabled": true
+        },
+        {
+            "name": "flow-qa-refused",
+            "script": "deployment/flow/qa_refused.py:run",
+            "every": 3600,
+            "enabled": true
+        },
+        {
+            "name": "flow-auto-update",
+            "script": "scripts/auto_update.py:run",
+            "every": 300,
+            "enabled": true,
+            "silent": true
         }
     ],
     "permissions": {

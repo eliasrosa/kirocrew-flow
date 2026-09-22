@@ -85,6 +85,75 @@ squads/my-squad.yaml
 O `deployment.py` é o **driving adapter** que executa esse loop como cron de
 script do Kiro Crew (zero token no polling).
 
+## Crons do App (app.json) e resolução de paths
+
+O `app.json` declara a esteira completa na seção `crons`. Quem instala o App já
+ganha os 8 crons de estágio (namespace `flow:*`) + o auto-update, sem
+configuração manual.
+
+### `script` (zero-token) em vez de `message` (LLM)
+
+Os crons antigos `crewflow-*` usavam o campo `message`, que dispara uma sessão
+de LLM a cada tick (gasta token). Os novos crons `flow-*` usam `script`,
+apontando para um entrypoint `run(ctx)` executado diretamente pelo runner de
+crons — **zero token** no polling, coerente com o design de scan por labels.
+
+| Cron | script | every (s) |
+|---|---|---|
+| `flow-develop-waiting` | `deployment/flow/dev.py:run` | 300 |
+| `flow-review-waiting` | `deployment/flow/reviewer.py:run` | 180 |
+| `flow-review-approved` | `deployment/flow/review_approved.py:run` | 120 |
+| `flow-review-refused` | `deployment/flow/rework.py:run` | 3600 |
+| `flow-merge-conflict` | `deployment/flow/conflict.py:run` | 300 |
+| `flow-qa-waiting` | `deployment/flow/qa_notify.py:run` | 600 |
+| `flow-qa-approved` | `deployment/flow/qa_approved.py:run` | 120 |
+| `flow-qa-refused` | `deployment/flow/qa_refused.py:run` | 3600 |
+
+### Como o gateway resolve o `script`
+
+Os `script` dos crons do App usam a forma **repo-relativa**
+(`deployment/flow/<x>.py:run`), resolvida em relação ao **diretório do App
+instalado** (`~/.kiro/crew/apps/kirocrew-flow`). Isso funciona porque a árvore
+inteira do repositório é copiada para o diretório do App na instalação, então o
+caminho relativo aponta para o arquivo já presente lá.
+
+Isso **contrasta** com os crons registrados manualmente via
+`scripts/install-cron.sh`, que usam paths **absolutos expandidos** enraizados em
+`~/.kiro/crew/crons/` (ex.: `~/.kiro/crew/crons/deployment/flow/dev.py:run`),
+porque aquele script copia os módulos para uma pasta diferente (`crons/`, não
+`apps/`).
+
+> **Limitação verificada:** a semântica exata de resolução de `script` de crons
+> declarados no App **não pôde ser confirmada em runtime** neste ambiente porque
+> a CLI/gateway `kirocrew` não está instalada no sandbox. A forma repo-relativa
+> adotada é a que corresponde ao modo como o App é instalado (cópia da árvore do
+> repo para o diretório do App). O critério de aceite
+> `kirocrew app disable/enable kirocrew-flow` deve ser validado num ambiente com
+> o gateway instalado.
+
+### Cron `flow-auto-update`
+
+Mantém a instalação sincronizada com `origin/main`. Roda a cada 300s, `silent`,
+e executa `git pull --rebase origin main && ./scripts/install-cron.sh`.
+
+Ele **não** usa uma variável de template `{app_dir}` no `command`, porque esse
+placeholder **não é suportado** neste código (o `Makefile` fixa `APP_DIR`
+estaticamente e nada consome `{app_dir}`). Em vez disso o cron aponta para
+`scripts/auto_update.py:run`, que **se autolocaliza** via
+`pathlib.Path(__file__).resolve().parent.parent` (a raiz do repo é o pai de
+`scripts/`) e nunca levanta exceção — uma atualização que falha não pode
+derrubar o runtime de crons.
+
+### Follow-up operacional
+
+- O cron avulso `kirocrew-flow-pull` (referenciado no commit `d492c02b`, que
+  **não está** no histórico local deste repo) pode ser aposentado assim que o
+  `flow-auto-update` estiver rodando dentro do App. Isso é uma ação operacional,
+  não uma mudança de código neste repositório.
+- Após puxar mudanças em `deployment/deployment.py`, `deployment/flow/*.py` ou
+  nos prompts, operadores devem reexecutar `./scripts/install-cron.sh` — que é
+  exatamente o que o `flow-auto-update` automatiza.
+
 ## Workspace isolado por task (Fase 2)
 
 Cada dispatch cria um **worktree efêmero** dedicado, garantindo que múltiplas
