@@ -47,7 +47,8 @@ async def on_startup(ctx: object) -> None:
         from deployment.deployment import (
             _STAGE_CONFLITO,
             _STAGE_DEV,
-            _STAGE_MERGE,
+            _STAGE_MERGE_QA,
+            _STAGE_MERGE_REVIEW,
             _STAGE_REVIEWER,
         )
 
@@ -68,8 +69,14 @@ async def on_startup(ctx: object) -> None:
                 ),
                 asyncio.create_task(
                     _run_stage_loop(
-                        _STAGE_MERGE,
-                        int(os.environ.get("CREWFLOW_MERGE_INTERVAL", "120")),
+                        _STAGE_MERGE_REVIEW,
+                        int(os.environ.get("CREWFLOW_REVIEW_APPROVED_INTERVAL", "120")),
+                    )
+                ),
+                asyncio.create_task(
+                    _run_stage_loop(
+                        _STAGE_MERGE_QA,
+                        int(os.environ.get("CREWFLOW_QA_APPROVED_INTERVAL", "120")),
                     )
                 ),
                 asyncio.create_task(
@@ -80,7 +87,7 @@ async def on_startup(ctx: object) -> None:
                 ),
             ]
         )
-        print("[kirocrew-flow] on_startup: 4 loops asyncio iniciados", flush=True)
+        print("[kirocrew-flow] on_startup: 5 loops asyncio iniciados", flush=True)
     except Exception as exc:
         print(f"[kirocrew-flow] on_startup error: {exc}", flush=True)
 

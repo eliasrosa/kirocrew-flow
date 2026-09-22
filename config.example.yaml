@@ -80,13 +80,14 @@ agent: "kirocrew"
 # apenas para o dispatch daquele estágio.
 #
 # stage_models:
-#   dev:       "kirocrew"    # implementação — modelo mais forte (default: `agent`)
-#   reviewer:  "kirocrew"    # code review   — modelo mais rápido (default: `agent`)
-#   merge:     "kirocrew"    # merge squash  — leve, quase sem raciocínio (default: `agent`)
-#   conflito:  "kirocrew"    # re-trabalho   — modelo de implementação (default: `agent`)
+#   dev:          "kirocrew"    # implementação    — modelo mais forte (default: `agent`)
+#   reviewer:     "kirocrew"    # code review      — modelo mais rápido (default: `agent`)
+#   merge-review: "kirocrew"    # merge pós-review — leve, quase sem raciocínio (default: `agent`)
+#   merge-qa:     "kirocrew"    # merge final QA   — leve, quase sem raciocínio (default: `agent`)
+#   conflito:     "kirocrew"    # re-trabalho      — modelo de implementação (default: `agent`)
 
 # ── Registro dos crons por estágio (recomendado) ──────────────────────────
-# Em vez de um cron monolítico `run`, registre 4 crons independentes.
+# Em vez de um cron monolítico `run`, registre 5 crons independentes.
 # Cada um tem seu log, intervalo e modelo isolados.
 #
 # cron_add(name="crewflow-dev",
@@ -97,15 +98,19 @@ agent: "kirocrew"
 #          script="~/.kiro/crew/crons/deployment.py:run_reviewer",
 #          every=300)        # reviewer: a cada 5 min
 #
-# cron_add(name="crewflow-merge",
-#          script="~/.kiro/crew/crons/deployment.py:run_merge",
-#          every=120)        # merge: a cada 2 min
+# cron_add(name="flow-review-approved",
+#          script="~/.kiro/crew/crons/deployment.py:run_review_approved",
+#          every=120)        # merge pós-review (flow:review-approved -> flow:qa-waiting): a cada 2 min
+#
+# cron_add(name="flow-qa-approved",
+#          script="~/.kiro/crew/crons/deployment.py:run_qa_approved",
+#          every=120)        # merge final pós-QA (flow:qa-approved -> flow:done): a cada 2 min
 #
 # cron_add(name="crewflow-conflito",
 #          script="~/.kiro/crew/crons/deployment.py:run_conflito",
 #          every=300)        # re-trabalho: a cada 5 min
 #
-# O cron legado `run` ainda funciona e orquestra todos os 4 estágios em sequência:
+# O cron legado `run` ainda funciona e orquestra todos os estágios em sequência:
 # cron_add(name="crewflow-scan",
 #          script="~/.kiro/crew/crons/deployment.py:run",
 #          every=600)

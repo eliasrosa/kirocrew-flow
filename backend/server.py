@@ -22,7 +22,8 @@ from backend.ctx import BackendCronCtx  # noqa: E402
 from deployment.deployment import (  # noqa: E402
     _STAGE_CONFLITO,
     _STAGE_DEV,
-    _STAGE_MERGE,
+    _STAGE_MERGE_QA,
+    _STAGE_MERGE_REVIEW,
     _STAGE_REVIEWER,
     _run_stage,
 )
@@ -40,7 +41,7 @@ async def _run_stage_loop(stage: str, interval: int) -> None:
     Token só gasto dentro de _dispatch() quando há trabalho real.
 
     Args:
-        stage:    um dos valores _STAGE_* (dev/reviewer/merge/conflito)
+        stage:    um dos valores _STAGE_* (dev/reviewer/merge-review/merge-qa/conflito)
         interval: segundos entre cada ciclo
     """
     ctx = BackendCronCtx()
@@ -69,8 +70,14 @@ async def start_background_loops(app: web.Application) -> None:
         ),
         asyncio.create_task(
             _run_stage_loop(
-                _STAGE_MERGE,
-                int(os.environ.get("CREWFLOW_MERGE_INTERVAL", "120")),
+                _STAGE_MERGE_REVIEW,
+                int(os.environ.get("CREWFLOW_REVIEW_APPROVED_INTERVAL", "120")),
+            )
+        ),
+        asyncio.create_task(
+            _run_stage_loop(
+                _STAGE_MERGE_QA,
+                int(os.environ.get("CREWFLOW_QA_APPROVED_INTERVAL", "120")),
             )
         ),
         asyncio.create_task(

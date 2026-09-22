@@ -6,7 +6,7 @@ Critérios de aceite:
 - handle_issues retorna {"columns": {todo, dev, review, reviewed, done, blocked}}
   mesmo em caso de erro no scan (fallback para colunas vazias)
 - handle_dispatch valida o body e retorna {"ok": true/false, ...}
-- _start_loops cria 4 tasks asyncio e imprime log
+- _start_loops cria 5 tasks asyncio e imprime log
 - _stop_loops cancela tasks e limpa a lista
 - _age_minutes calcula a idade em minutos
 - _state_to_column mapeia os estados para colunas do kanban
@@ -382,12 +382,12 @@ class TestEmptyColumns:
 
 
 class TestStartLoops:
-    def test_creates_four_tasks(self, capsys: pytest.CaptureFixture) -> None:  # type: ignore[type-arg]
-        """_start_loops deve criar 4 tasks no app e imprimir log."""
+    def test_creates_five_tasks(self, capsys: pytest.CaptureFixture) -> None:  # type: ignore[type-arg]
+        """_start_loops deve criar 5 tasks no app e imprimir log."""
         app = web.Application()
 
         with mock.patch("backend.routes.asyncio.create_task") as mock_create_task:
-            fake_tasks = [mock.MagicMock() for _ in range(4)]
+            fake_tasks = [mock.MagicMock() for _ in range(5)]
             mock_create_task.side_effect = fake_tasks
 
             with mock.patch.dict(
@@ -399,20 +399,21 @@ class TestStartLoops:
                     "deployment.deployment": mock.MagicMock(
                         _STAGE_DEV="dev",
                         _STAGE_REVIEWER="reviewer",
-                        _STAGE_MERGE="merge",
+                        _STAGE_MERGE_REVIEW="merge-review",
+                        _STAGE_MERGE_QA="merge-qa",
                         _STAGE_CONFLITO="conflito",
                     ),
                 },
             ):
                 asyncio.get_event_loop().run_until_complete(_start_loops(app))
 
-        assert mock_create_task.call_count == 4
+        assert mock_create_task.call_count == 5
         assert "crewflow_tasks" in app
-        assert len(app["crewflow_tasks"]) == 4
+        assert len(app["crewflow_tasks"]) == 5
 
         captured = capsys.readouterr()
         assert "on_startup" in captured.out
-        assert "4 loops asyncio iniciados" in captured.out
+        assert "5 loops asyncio iniciados" in captured.out
 
     def test_handles_import_error_gracefully(self, capsys: pytest.CaptureFixture) -> None:  # type: ignore[type-arg]
         """_start_loops não deve propagar exceção se imports falharem."""

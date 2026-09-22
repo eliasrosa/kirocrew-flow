@@ -1,0 +1,7 @@
+{
+  "name": "flow-review-approved",
+  "model": "auto",
+  "description": "Executa merge squash de PRs após review aprovado (flow:review-approved) e move a issue para flow:qa-waiting quando auto_merge_on_approve está habilitado.",
+  "prompt": "Você é o agente de merge pós-review da esteira kirocrew-flow. Receba a instrução do cron e execute o dispatch de merge squash da PR aprovada, movendo a issue para flow:qa-waiting.",
+  "tools": ["@kirocrew-core"]
+}

@@ -1,7 +1,8 @@
 """Testes para os entrypoints por estágio (issue #87).
 
-Valida que cada cron por estágio (run_dev, run_reviewer, run_merge, run_conflito)
-processa apenas as ações do seu estágio, ignorando issues dos demais.
+Valida que cada cron por estágio (run_dev, run_reviewer, run_review_approved,
+run_qa_approved, run_conflito) processa apenas as ações do seu estágio,
+ignorando issues dos demais.
 
 Critérios de aceite da issue:
   - N crons independentes, cada um cobrindo um estágio
@@ -29,9 +30,11 @@ from deployment.deployment import (  # noqa: E402
     _stage_model,
     run_conflito,
     run_dev,
-    run_merge,
+    run_qa_approved,
+    run_review_approved,
     run_reviewer,
 )
+from flow.domain.state import State  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -356,91 +359,172 @@ class TestRunReviewer:
 
 
 # ---------------------------------------------------------------------------
-# run_merge — só executa MERGE_PR
+# Helpers de merge — resultados por estado de origem
 # ---------------------------------------------------------------------------
 
-class TestRunMerge:
-    def _make_merge_result(self) -> object:
-        """ScanResult em flow:review-waiting + flow:reviewed com ReviewerResult aprovado."""
-        from flow.audit.state_comment import StateComment, render
-        from flow.domain.gates import WorkItem
-        from flow.domain.state import Modifier, State
-        from flow.scan.scanner import ScanResult
+def _make_review_approved_result() -> object:
+    """ScanResult em flow:review-approved (origem do merge pós-review)."""
+    from flow.domain.gates import WorkItem
+    from flow.domain.state import State
+    from flow.scan.scanner import ScanResult
 
-        sc = StateComment(
-            workflow="feature (v1)", current_node="review",
-            status="reviewed", repo="owner/repo",
-        )
-        sc.set_reviewer_result(approved=True, comments=[], sha="abc123")
-        self._state_body = render(sc)
+    return ScanResult(
+        item=WorkItem(
+            key="https://github.com/owner/repo/issues/42",
+            title="[owner/repo] Feature X",
+            labels=frozenset(["flow:review-approved"]),
+        ),
+        current_state=State.REVIEW_APPROVED,
+        modifiers=frozenset(),
+        dispatch_candidate=False,
+        spec_valid=None,
+        changed=True,
+        reason="review-approved",
+    )
 
-        return ScanResult(
-            item=WorkItem(
-                key="https://github.com/owner/repo/issues/42",
-                title="[owner/repo] Feature X",
-                labels=frozenset(["flow:review-waiting", "flow:reviewed"]),
-            ),
-            current_state=State.REVIEW_WAITING,
-            modifiers=frozenset([Modifier.REVIEWED]),
-            dispatch_candidate=False,
-            spec_valid=None,
-            changed=True,
-            reason="reviewer aprovado",
-        )
 
-    def test_executa_merge_quando_reviewer_aprovado(self) -> None:
-        """run_merge executa _execute_auto_merges para PR aprovado com auto_merge_on_approve=true."""
+def _make_qa_approved_result() -> object:
+    """ScanResult em flow:qa-approved (origem do merge final pós-QA)."""
+    from flow.domain.gates import WorkItem
+    from flow.domain.state import State
+    from flow.scan.scanner import ScanResult
+
+    return ScanResult(
+        item=WorkItem(
+            key="https://github.com/owner/repo/issues/77",
+            title="[owner/repo] Feature Y",
+            labels=frozenset(["flow:qa-approved"]),
+        ),
+        current_state=State.QA_APPROVED,
+        modifiers=frozenset(),
+        dispatch_candidate=False,
+        spec_valid=None,
+        changed=True,
+        reason="qa-approved",
+    )
+
+
+def _merge_stage_mocks(results: list, cfg: dict):
+    """Context manager tuple com os mocks comuns aos estágios de merge."""
+    return (
+        mock.patch("deployment.deployment._load_config", return_value=cfg),
+        mock.patch("deployment.deployment.scan_candidates", return_value=results),
+        mock.patch("deployment.deployment.open_cache"),
+        mock.patch("deployment.deployment.provider_for"),
+        mock.patch("deployment.deployment._execute_auto_merges"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_review_approved — merge pós-review (flow:review-approved -> flow:qa-waiting)
+# ---------------------------------------------------------------------------
+
+class TestRunReviewApproved:
+    def test_executa_merge_para_review_approved(self) -> None:
+        """run_review_approved executa _execute_auto_merges para flow:review-approved."""
         ctx = _make_ctx()
-        result = self._make_merge_result()
+        result = _make_review_approved_result()
+        cfg = _base_config(workflow_params={"auto_merge_on_approve": True})
 
-        def _fake_get_state(repo: str, key: str) -> str:
-            return self._state_body
-
-        fake_pr = {
-            "number": 99, "headRefName": "feat/issue-42",
-            "headRefOid": "abc123", "body": "Closes #42",
-        }
-        cfg_with_auto_merge = _base_config(
-            workflow_params={"auto_merge_on_approve": True}
-        )
-
-        with (
-            mock.patch("deployment.deployment._load_config",
-                       return_value=cfg_with_auto_merge),
-            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
-            mock.patch("deployment.deployment.open_cache") as mock_cache,
-            mock.patch("deployment.deployment.provider_for") as mock_pf,
-            mock.patch("deployment.deployment._execute_auto_merges") as mock_merge,
-        ):
-            mock_cache.return_value.__enter__ = mock.MagicMock(
-                return_value=sqlite3.connect(":memory:"))
-            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
-            mock_provider = mock.MagicMock()
-            mock_provider.get_state_comment = _fake_get_state
-            mock_provider.get_pr_for_issue = mock.MagicMock(return_value=fake_pr)
-            mock_pf.return_value = mock_provider
-            run_merge(ctx)
-
-        mock_merge.assert_called_once()
-
-    def test_nao_executa_merge_para_issue_em_todo(self) -> None:
-        """run_merge NÃO toca em issues flow:develop-waiting."""
-        ctx = _make_ctx()
-        result = _make_scan_result("flow:develop-waiting")
-
-        with (
-            mock.patch("deployment.deployment._load_config",
-                       return_value=_base_config()),
-            mock.patch("deployment.deployment.scan_candidates", return_value=[result]),
-            mock.patch("deployment.deployment.open_cache") as mock_cache,
-            mock.patch("deployment.deployment.provider_for") as mock_pf,
-            mock.patch("deployment.deployment._execute_auto_merges") as mock_merge,
-        ):
+        p_cfg, p_scan, p_cache, p_pf, p_merge = _merge_stage_mocks([result], cfg)
+        with p_cfg, p_scan, p_cache as mock_cache, p_pf as mock_pf, p_merge as mock_merge:
             mock_cache.return_value.__enter__ = mock.MagicMock(
                 return_value=sqlite3.connect(":memory:"))
             mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
             mock_pf.return_value = mock.MagicMock()
-            run_merge(ctx)
+            run_review_approved(ctx)
+
+        mock_merge.assert_called_once()
+        # Verifica que a transição de destino é flow:qa-waiting (NÃO flow:done)
+        _, kwargs = mock_merge.call_args
+        assert kwargs["target_state"] is State.QA_WAITING
+
+    def test_nao_executa_merge_para_qa_approved(self) -> None:
+        """run_review_approved NÃO toca em issues flow:qa-approved."""
+        ctx = _make_ctx()
+        result = _make_qa_approved_result()
+        cfg = _base_config(workflow_params={"auto_merge_on_approve": True})
+
+        p_cfg, p_scan, p_cache, p_pf, p_merge = _merge_stage_mocks([result], cfg)
+        with p_cfg, p_scan, p_cache as mock_cache, p_pf as mock_pf, p_merge as mock_merge:
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pf.return_value = mock.MagicMock()
+            run_review_approved(ctx)
+
+        mock_merge.assert_not_called()
+
+    def test_nao_executa_merge_para_issue_em_todo(self) -> None:
+        """run_review_approved NÃO toca em issues flow:develop-waiting."""
+        ctx = _make_ctx()
+        result = _make_scan_result("flow:develop-waiting")
+        cfg = _base_config()
+
+        p_cfg, p_scan, p_cache, p_pf, p_merge = _merge_stage_mocks([result], cfg)
+        with p_cfg, p_scan, p_cache as mock_cache, p_pf as mock_pf, p_merge as mock_merge:
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pf.return_value = mock.MagicMock()
+            run_review_approved(ctx)
+
+        mock_merge.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# run_qa_approved — merge final pós-QA (flow:qa-approved -> flow:done)
+# ---------------------------------------------------------------------------
+
+class TestRunQaApproved:
+    def test_executa_merge_para_qa_approved(self) -> None:
+        """run_qa_approved executa _execute_auto_merges para flow:qa-approved."""
+        ctx = _make_ctx()
+        result = _make_qa_approved_result()
+        cfg = _base_config()
+
+        p_cfg, p_scan, p_cache, p_pf, p_merge = _merge_stage_mocks([result], cfg)
+        with p_cfg, p_scan, p_cache as mock_cache, p_pf as mock_pf, p_merge as mock_merge:
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pf.return_value = mock.MagicMock()
+            run_qa_approved(ctx)
+
+        mock_merge.assert_called_once()
+        # Verifica que a transição de destino é flow:done
+        _, kwargs = mock_merge.call_args
+        assert kwargs["target_state"] is State.DONE
+
+    def test_nao_executa_merge_para_review_approved(self) -> None:
+        """run_qa_approved NÃO toca em issues flow:review-approved."""
+        ctx = _make_ctx()
+        result = _make_review_approved_result()
+        cfg = _base_config(workflow_params={"auto_merge_on_approve": True})
+
+        p_cfg, p_scan, p_cache, p_pf, p_merge = _merge_stage_mocks([result], cfg)
+        with p_cfg, p_scan, p_cache as mock_cache, p_pf as mock_pf, p_merge as mock_merge:
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pf.return_value = mock.MagicMock()
+            run_qa_approved(ctx)
+
+        mock_merge.assert_not_called()
+
+    def test_nao_executa_merge_para_issue_em_todo(self) -> None:
+        """run_qa_approved NÃO toca em issues flow:develop-waiting."""
+        ctx = _make_ctx()
+        result = _make_scan_result("flow:develop-waiting")
+        cfg = _base_config()
+
+        p_cfg, p_scan, p_cache, p_pf, p_merge = _merge_stage_mocks([result], cfg)
+        with p_cfg, p_scan, p_cache as mock_cache, p_pf as mock_pf, p_merge as mock_merge:
+            mock_cache.return_value.__enter__ = mock.MagicMock(
+                return_value=sqlite3.connect(":memory:"))
+            mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pf.return_value = mock.MagicMock()
+            run_qa_approved(ctx)
 
         mock_merge.assert_not_called()
 
@@ -653,8 +737,8 @@ class TestEstagioIsolamento:
         mock_merge.assert_not_called()
         mock_dispatch.assert_not_called()
 
-    def test_run_merge_nao_aciona_dispatch_dev(self) -> None:
-        """run_merge com scan retornando issue em todo não faz dispatch dev."""
+    def test_run_review_approved_nao_aciona_dispatch_dev(self) -> None:
+        """run_review_approved com scan retornando issue em todo não faz dispatch dev."""
         ctx = _make_ctx()
         todo_result = _make_scan_result("flow:develop-waiting")
 
@@ -672,7 +756,7 @@ class TestEstagioIsolamento:
                 return_value=sqlite3.connect(":memory:"))
             mock_cache.return_value.__exit__ = mock.MagicMock(return_value=False)
             mock_pf.return_value = mock.MagicMock()
-            run_merge(ctx)
+            run_review_approved(ctx)
 
         mock_merge.assert_not_called()
         mock_dispatch.assert_not_called()
@@ -800,3 +884,74 @@ class TestDryRunPorEstagio:
             run_reviewer(ctx)
 
         mock_rev.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Transição de label por estágio de merge — guarda de regressão
+#
+# Prova que o merge pós-review vai para flow:qa-waiting e o merge pós-QA vai
+# para flow:done. Este teste falharia sob o antigo comportamento hardcoded
+# (State.DONE para todo merge).
+# ---------------------------------------------------------------------------
+
+class TestMergeLabelTransition:
+    def _run_execute_auto_merges(
+        self, *, current_labels: list[str], target_state: State,
+        remove_modifiers: tuple[str, ...],
+    ) -> list[str]:
+        from deployment.deployment import _execute_auto_merges
+        from flow.adapters import github_client as gh_client
+
+        ctx = _make_ctx()
+        items = [("owner/repo", {"number": 42, "title": "Feature X",
+                                 "url": "https://github.com/owner/repo/issues/42"}, None)]
+        captured: dict = {}
+
+        def _capture_set_labels(repo: str, key: str, labels: list[str]) -> None:
+            captured["labels"] = labels
+
+        with (
+            mock.patch.object(gh_client, "get_pr_for_issue",
+                              return_value={"number": 99, "headRefName": "feat/issue-42"}),
+            mock.patch.object(gh_client, "get_work_item",
+                              return_value={"labels": current_labels}),
+            mock.patch.object(gh_client, "set_labels", side_effect=_capture_set_labels),
+            mock.patch.object(gh_client, "merge_pull_request"),
+            mock.patch.object(gh_client, "delete_branch"),
+            mock.patch.object(gh_client, "add_issue_comment"),
+            mock.patch("deployment.deployment._post_reviewer_result_on_pr"),
+        ):
+            _execute_auto_merges(
+                ctx, items, "", mock.MagicMock(),
+                target_state=target_state,
+                remove_modifiers=remove_modifiers,
+            )
+
+        return captured.get("labels", [])
+
+    def test_review_approved_merge_vai_para_qa_waiting(self) -> None:
+        """Merge pós-review transiciona flow:review-approved -> flow:qa-waiting."""
+        labels = self._run_execute_auto_merges(
+            current_labels=["flow:review-approved", "flow:reviewed", "flow:feature"],
+            target_state=State.QA_WAITING,
+            remove_modifiers=("flow:review-approved", "flow:reviewed"),
+        )
+
+        assert "flow:qa-waiting" in labels
+        assert "flow:done" not in labels          # NÃO deve ir para done
+        assert "flow:review-approved" not in labels
+        assert "flow:reviewed" not in labels
+        assert "flow:feature" in labels           # labels externas preservadas
+
+    def test_qa_approved_merge_vai_para_done(self) -> None:
+        """Merge final pós-QA transiciona flow:qa-approved -> flow:done."""
+        labels = self._run_execute_auto_merges(
+            current_labels=["flow:qa-approved", "flow:feature"],
+            target_state=State.DONE,
+            remove_modifiers=("flow:qa-approved",),
+        )
+
+        assert "flow:done" in labels
+        assert "flow:qa-waiting" not in labels
+        assert "flow:qa-approved" not in labels
+        assert "flow:feature" in labels

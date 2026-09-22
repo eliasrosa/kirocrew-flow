@@ -135,8 +135,10 @@ Depois registre os crons no dashboard do Kiro Crew. Há duas opções:
 cron_add(name="crewflow-dev",      script="~/.kiro/crew/crons/deployment.py:run_dev",      every=600)
 # Reviewer: code review (PRs flow:review-waiting)
 cron_add(name="crewflow-reviewer", script="~/.kiro/crew/crons/deployment.py:run_reviewer", every=300)
-# Merge: merge squash (flow:review-approved ou flow:qa-approved)
-cron_add(name="crewflow-merge",    script="~/.kiro/crew/crons/deployment.py:run_merge",    every=120)
+# Review-approved: merge squash pós-review (flow:review-approved -> flow:qa-waiting)
+cron_add(name="flow-review-approved", script="~/.kiro/crew/crons/deployment.py:run_review_approved", every=120)
+# QA-approved: merge final pós-QA (flow:qa-approved -> flow:done)
+cron_add(name="flow-qa-approved",     script="~/.kiro/crew/crons/deployment.py:run_qa_approved",     every=120)
 # Conflito: resolução de merge conflict (flow:merge-conflict)
 cron_add(name="crewflow-conflito", script="~/.kiro/crew/crons/deployment.py:run_conflito", every=300)
 ```

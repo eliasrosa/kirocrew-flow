@@ -91,12 +91,13 @@ class TestHookSignatures:
                 "deployment.deployment": mock.MagicMock(
                     _STAGE_DEV="dev",
                     _STAGE_REVIEWER="reviewer",
-                    _STAGE_MERGE="merge",
+                    _STAGE_MERGE_REVIEW="merge-review",
+                    _STAGE_MERGE_QA="merge-qa",
                     _STAGE_CONFLITO="conflito",
                 ),
             },
         ), mock.patch("backend.hooks.asyncio.create_task") as mock_create_task:
-            mock_create_task.side_effect = [mock.MagicMock() for _ in range(4)]
+            mock_create_task.side_effect = [mock.MagicMock() for _ in range(5)]
             # ctx posicional único; não deve levantar
             asyncio.get_event_loop().run_until_complete(on_startup(mock.MagicMock()))
         hooks._TASKS.clear()
@@ -107,16 +108,16 @@ class TestHookSignatures:
 
 
 # ---------------------------------------------------------------------------
-# on_startup cria 4 tasks; on_shutdown cancela e limpa
+# on_startup cria 5 tasks; on_shutdown cancela e limpa
 # ---------------------------------------------------------------------------
 
 
 class TestLoopLifecycle:
-    def test_on_startup_creates_four_tasks(
+    def test_on_startup_creates_five_tasks(
         self, capsys: pytest.CaptureFixture
     ) -> None:  # type: ignore[type-arg]
         hooks._TASKS.clear()
-        fake_tasks = [mock.MagicMock() for _ in range(4)]
+        fake_tasks = [mock.MagicMock() for _ in range(5)]
         with mock.patch.dict(
             "sys.modules",
             {
@@ -126,7 +127,8 @@ class TestLoopLifecycle:
                 "deployment.deployment": mock.MagicMock(
                     _STAGE_DEV="dev",
                     _STAGE_REVIEWER="reviewer",
-                    _STAGE_MERGE="merge",
+                    _STAGE_MERGE_REVIEW="merge-review",
+                    _STAGE_MERGE_QA="merge-qa",
                     _STAGE_CONFLITO="conflito",
                 ),
             },
@@ -134,17 +136,17 @@ class TestLoopLifecycle:
             mock_create_task.side_effect = fake_tasks
             asyncio.get_event_loop().run_until_complete(on_startup(mock.MagicMock()))
 
-        assert mock_create_task.call_count == 4
-        assert len(hooks._TASKS) == 4
+        assert mock_create_task.call_count == 5
+        assert len(hooks._TASKS) == 5
         captured = capsys.readouterr()
         assert "on_startup" in captured.out
-        assert "4 loops asyncio iniciados" in captured.out
+        assert "5 loops asyncio iniciados" in captured.out
         hooks._TASKS.clear()
 
     def test_on_shutdown_cancels_and_clears(
         self, capsys: pytest.CaptureFixture
     ) -> None:  # type: ignore[type-arg]
-        fake_tasks = [mock.MagicMock() for _ in range(4)]
+        fake_tasks = [mock.MagicMock() for _ in range(5)]
         hooks._TASKS.clear()
         hooks._TASKS.extend(fake_tasks)
 

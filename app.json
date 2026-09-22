@@ -13,7 +13,8 @@
     "agents": [
         "agents/crewflow-dev.json",
         "agents/crewflow-reviewer.json",
-        "agents/crewflow-merge.json"
+        "agents/flow-review-approved.json",
+        "agents/flow-qa-approved.json"
     ],
     "backend": {
         "hooks": {
@@ -50,9 +51,15 @@
             "enabled": false
         },
         {
-            "name": "crewflow-merge",
+            "name": "flow-review-approved",
             "every": 120,
-            "message": "crewflow: trigger merge stage",
+            "message": "crewflow: trigger review-approved merge stage",
+            "enabled": false
+        },
+        {
+            "name": "flow-qa-approved",
+            "every": 120,
+            "message": "crewflow: trigger qa-approved merge stage",
             "enabled": false
         },
         {

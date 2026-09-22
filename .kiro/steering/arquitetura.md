@@ -268,9 +268,12 @@ Quando o reviewer reprova, o motor adiciona `flow:review-refused` à issue (remo
 3. Commita e faz push (o novo SHA invalida `crewflow:reviewed` automaticamente)
 4. Volta a issue para `flow:review-waiting` (remove `flow:review-refused`)
 
-Quando o reviewer aprova, o motor adiciona `flow:review-waiting-ok` (removendo
-`flow:review-waiting` e `crewflow:reviewed`). O cron `run_merge` lê `review-ok`
-e executa o merge squash, sem precisar ler o state_comment.
+Quando o reviewer aprova, o motor adiciona `flow:review-approved` (removendo
+`flow:review-waiting` e `crewflow:reviewed`). O cron `run_review_approved` lê
+`flow:review-approved` e executa o merge squash movendo a issue para
+`flow:qa-waiting`, sem precisar ler o state_comment. Após o QA aprovar
+(`flow:qa-approved`), o cron `run_qa_approved` executa o merge final movendo a
+issue para `flow:done`.
 
 Teto de iterações: `gates.exceeded_review_iterations()` controla o cap (default 3).
 Após o teto, o executor escala para `NOTIFY_HUMAN tl` em vez de continuar despachando.

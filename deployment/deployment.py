@@ -16,13 +16,14 @@ Depende do Kiro Crew rodando (loopback interno). NÃO é standalone.
 
 ## Entrypoints por estágio (recomendado)
 
-Em vez de um único cron monolítico, a esteira pode ser dividida em 4 crons
+Em vez de um único cron monolítico, a esteira pode ser dividida em crons
 independentes, cada um responsável por um estágio do fluxo:
 
-    run_dev(ctx)       — issues flow:develop-waiting → dispatch dev (modelo mais forte)
-    run_reviewer(ctx)  — PRs flow:review-waiting → dispatch reviewer (modelo mais rápido)
-    run_merge(ctx)     — flow:review-approved / flow:qa-approved → merge squash
-    run_conflito(ctx)  — flow:review-refused → gate humano + flow:merge-conflict → resolução
+    run_dev(ctx)            — issues flow:develop-waiting → dispatch dev (modelo mais forte)
+    run_reviewer(ctx)       — PRs flow:review-waiting → dispatch reviewer (modelo mais rápido)
+    run_review_approved(ctx)— flow:review-approved → merge squash → flow:qa-waiting
+    run_qa_approved(ctx)    — flow:qa-approved → merge squash final → flow:done
+    run_conflito(ctx)       — flow:review-refused → gate humano + flow:merge-conflict → resolução
 
 Vantagens:
   - Observabilidade: cada cron tem log/histórico isolado
@@ -31,10 +32,11 @@ Vantagens:
   - Interval por estágio: reviewer pode varrer mais rápido que dev
 
 Registro (uma vez por estágio):
-    cron_add(name="crewflow-dev",       script="~/.kiro/crew/crons/deployment.py:run_dev",       every=600)
-    cron_add(name="crewflow-reviewer",  script="~/.kiro/crew/crons/deployment.py:run_reviewer",  every=300)
-    cron_add(name="crewflow-merge",     script="~/.kiro/crew/crons/deployment.py:run_merge",     every=120)
-    cron_add(name="crewflow-conflito",  script="~/.kiro/crew/crons/deployment.py:run_conflito",  every=300)
+    cron_add(name="crewflow-dev",             script="~/.kiro/crew/crons/deployment.py:run_dev",             every=600)
+    cron_add(name="crewflow-reviewer",        script="~/.kiro/crew/crons/deployment.py:run_reviewer",        every=300)
+    cron_add(name="crewflow-review-approved", script="~/.kiro/crew/crons/deployment.py:run_review_approved", every=120)
+    cron_add(name="crewflow-qa-approved",     script="~/.kiro/crew/crons/deployment.py:run_qa_approved",     every=120)
+    cron_add(name="crewflow-conflito",        script="~/.kiro/crew/crons/deployment.py:run_conflito",        every=300)
 
 O entrypoint legado `run(ctx)` ainda funciona e orquestra todos os estágios em
 sequência — útil em modo de aviso (auto_dispatch=false) ou durante a migração.
@@ -1120,7 +1122,8 @@ def _dry_run_report(
         _r_mc: ScanResult = result  # type: ignore[assignment]
         print(f"[DRY-RUN] {_r_mc.item.key} → MARK_CONFLITO — {_r_mc.item.title}")
 
-    for repo, issue in merge_prs:
+    for _mp in merge_prs:
+        repo, issue = _mp[0], _mp[1]
         print(f"[DRY-RUN] {repo}#{issue['number']} → MERGE_PR — {issue['title']}")
 
     for result, decision, _sc in needs_human:
@@ -1321,7 +1324,7 @@ def run(ctx: object) -> None:
     needs_human: list[tuple[ScanResult, object, str | None]] = []  # (result, decision, sc)
     blocked_bypass: list[ScanResult] = []                # result com bypass sem justif
     rebranded: list[tuple[ScanResult, object]] = []      # (result, decision)
-    merge_prs: list[tuple[str, dict, str | None]] = []   # (repo, issue, state_comment) — merge squash automático
+    merge_prs: list[tuple[str, dict, str | None, State | None]] = []   # (repo, issue, state_comment, current_state) — merge squash automático
     dead_session_candidates: list[ScanResult] = []       # issues dev+running sem sinais de vida
 
     # Conjunto de issues em flow:develop-running: usadas para calcular
@@ -1415,7 +1418,7 @@ def run(ctx: object) -> None:
         elif decision.action is ActionKind.MERGE_PR:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             issue = _scan_result_to_issue(result)
-            merge_prs.append((repo, issue, state_comment))
+            merge_prs.append((repo, issue, state_comment, result.current_state))
         elif decision.action is ActionKind.DISPATCH_REWORK:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             if not repo:
@@ -1726,7 +1729,34 @@ def run(ctx: object) -> None:
                 )
 
     if merge_prs:
-        _execute_auto_merges(ctx, merge_prs, chat_id, provider)
+        # O entrypoint legado processa todos os merges, mas cada estado de
+        # origem tem a sua própria transição de destino:
+        #   flow:review-approved → flow:qa-waiting
+        #   flow:qa-approved     → flow:done
+        _review_merges = [
+            (repo, issue, sc)
+            for repo, issue, sc, cur_state in merge_prs
+            if cur_state in (State.REVIEW_APPROVED, State.REVIEW_WAITING)
+        ]
+        _qa_merges = [
+            (repo, issue, sc)
+            for repo, issue, sc, cur_state in merge_prs
+            if cur_state is State.QA_APPROVED
+        ]
+        if _review_merges:
+            _execute_auto_merges(
+                ctx, _review_merges, chat_id, provider,
+                target_state=State.QA_WAITING,
+                remove_modifiers=("flow:review-approved", "flow:reviewed"),
+                merge_reason="Reviewer aprovou sem comentários.",
+            )
+        if _qa_merges:
+            _execute_auto_merges(
+                ctx, _qa_merges, chat_id, provider,
+                target_state=State.DONE,
+                remove_modifiers=("flow:qa-approved",),
+                merge_reason="QA aprovou.",
+            )
 
     # ── Aplica flow:merge-conflict nas PRs com conflito detectado ──────────
     if mark_conflitos:
@@ -2666,15 +2696,26 @@ def _execute_auto_merges(
     items: list,
     chat_id: str,
     provider: object,
+    target_state: State = State.DONE,
+    remove_modifiers: tuple[str, ...] = ("flow:review-approved", "flow:reviewed"),
+    merge_reason: str = "Reviewer aprovou sem comentários.",
 ) -> None:
-    """Executa merge squash automático para PRs aprovados sem comentários.
+    """Executa merge squash automático para PRs aprovados.
 
     Para cada (repo, issue, state_comment) em ``items``:
     1. Posta resultado do reviewer no PR (e referência curta na issue)
     2. Localiza o PR aberto associado à issue
     3. Faz o merge squash via GitHub API
-    4. Atualiza labels: adiciona crewflow:done, remove crewflow:review-ok (e review/reviewed se presentes)
+    4. Atualiza labels: transiciona para ``target_state`` removendo ``remove_modifiers``
     5. Notifica TL com resultado (sucesso ou falha)
+
+    Args:
+        target_state:     estado de destino da issue após o merge. Para o estágio
+                          review-approved é ``State.QA_WAITING``; para o estágio
+                          qa-approved é ``State.DONE``.
+        remove_modifiers: labels a remover na transição (ex: a label de origem).
+        merge_reason:     texto usado no comentário de confirmação do merge,
+                          descrevendo o motivo do merge para cada estágio.
     """
     from flow.adapters import github_client as gh_client
     from flow.ports.issue_provider import ProviderError
@@ -2719,8 +2760,8 @@ def _execute_auto_merges(
                 item_data = gh_client.get_work_item(repo, str(issue_number))
                 new_labels = _apply_state_transition(
                     item_data.get("labels", []),
-                    State.DONE,
-                    remove_modifiers=("flow:review-approved", "flow:reviewed"),
+                    target_state,
+                    remove_modifiers=remove_modifiers,
                 )
                 gh_client.set_labels(repo, str(issue_number), new_labels)
             except Exception as exc:
@@ -2738,7 +2779,7 @@ def _execute_auto_merges(
                     repo,
                     issue_number,
                     f"✅ **Merge automático** — PR #{pr_number} mergeado em {now}.\n\n"
-                    f"Reviewer aprovou sem comentários. Branch `{pr_branch}` deletada.",
+                    f"{merge_reason} Branch `{pr_branch}` deletada.",
                 )
 
             merged.append((repo, issue))
@@ -2784,23 +2825,26 @@ def _execute_auto_merges(
 # ── Entrypoints por estágio ───────────────────────────────────────────────
 #
 # Cada função de entrypoint é um cron de script independente.
-# Use `run_dev`, `run_reviewer`, `run_merge` e `run_conflito` em vez de `run`
-# para ter crons com logs, intervalos e modelos isolados por estágio.
+# Use `run_dev`, `run_reviewer`, `run_review_approved`, `run_qa_approved` e
+# `run_conflito` em vez de `run` para ter crons com logs, intervalos e modelos
+# isolados por estágio.
 #
 # O parâmetro `model` sobrescreve `cfg.agent` apenas para o dispatch deste
 # estágio — o scanner não usa LLM (zero token), só o dispatch usa.
 # Configure via `stage_models` na deployment.config.yaml:
 #
 #   stage_models:
-#     dev:       "kirocrew"            # modelo mais forte (implementação)
-#     reviewer:  "kirocrew"            # modelo mais rápido (review)
-#     merge:     "kirocrew"            # merge squash (leve)
-#     conflito:  "kirocrew"            # re-trabalho pós-review
+#     dev:           "kirocrew"        # modelo mais forte (implementação)
+#     reviewer:      "kirocrew"        # modelo mais rápido (review)
+#     merge-review:  "kirocrew"        # merge squash pós-review (leve)
+#     merge-qa:      "kirocrew"        # merge squash final pós-QA (leve)
+#     conflito:      "kirocrew"        # re-trabalho pós-review
 
-_STAGE_DEV      = "dev"
-_STAGE_REVIEWER = "reviewer"
-_STAGE_MERGE    = "merge"
-_STAGE_CONFLITO = "conflito"
+_STAGE_DEV           = "dev"
+_STAGE_REVIEWER      = "reviewer"
+_STAGE_MERGE_REVIEW  = "merge-review"
+_STAGE_MERGE_QA      = "merge-qa"
+_STAGE_CONFLITO      = "conflito"
 
 # ActionKinds por estágio — o filtro que cada entrypoint aplica sobre o scan
 #
@@ -2811,10 +2855,11 @@ _STAGE_CONFLITO = "conflito"
 #                          já foi aplicado na issue (Modifier.CONFLITO presente).
 #   - dispatch_rework    → _STAGE_CONFLITO: re-trabalho pós-review (review-fail).
 _STAGE_ACTIONS = {
-    _STAGE_DEV:      frozenset({"dispatch_dev"}),
-    _STAGE_REVIEWER: frozenset({"dispatch_reviewer", "mark_conflito"}),
-    _STAGE_MERGE:    frozenset({"merge_pr"}),
-    _STAGE_CONFLITO: frozenset({"dispatch_rework", "dispatch_conflict_resolver"}),
+    _STAGE_DEV:          frozenset({"dispatch_dev"}),
+    _STAGE_REVIEWER:     frozenset({"dispatch_reviewer", "mark_conflito"}),
+    _STAGE_MERGE_REVIEW: frozenset({"merge_pr"}),
+    _STAGE_MERGE_QA:     frozenset({"merge_pr"}),
+    _STAGE_CONFLITO:     frozenset({"dispatch_rework", "dispatch_conflict_resolver"}),
 }
 
 
@@ -2832,7 +2877,7 @@ def _run_stage(ctx: object, stage: str) -> None:
 
     Args:
         ctx:   contexto do cron do Kiro Crew
-        stage: um dos valores _STAGE_* (dev/reviewer/merge/conflito)
+        stage: um dos valores _STAGE_* (dev/reviewer/merge-review/merge-qa/conflito)
     """
     _check_installed_version(ctx)
     cfg = _load_config()
@@ -3046,7 +3091,7 @@ def _run_stage(ctx: object, stage: str) -> None:
         elif decision.action is ActionKind.MERGE_PR:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
             issue = _scan_result_to_issue(result)
-            merge_prs.append((repo, issue, state_comment))
+            merge_prs.append((repo, issue, state_comment, result.current_state))
 
         elif decision.action is ActionKind.DISPATCH_REWORK:
             repo = result.item.key.split("/issues/")[0].replace("https://github.com/", "")
@@ -3233,9 +3278,39 @@ def _run_stage(ctx: object, stage: str) -> None:
                 f"flow:merge-conflict aplicado.{vm}\n{linhas_mc}"
             )
 
-    elif stage == _STAGE_MERGE:
-        if merge_prs:
-            _execute_auto_merges(ctx, merge_prs, chat_id, provider)
+    elif stage == _STAGE_MERGE_REVIEW:
+        # Merge pós-review: processa merges cuja origem é o review
+        # (flow:review-approved ou flow:review-waiting+flow:reviewed com
+        # resultado aprovado — ambos emitem MERGE_PR rumo a flow:qa-waiting).
+        # Transição: → merge squash → flow:qa-waiting.
+        review_items = [
+            (repo, issue, sc)
+            for repo, issue, sc, cur_state in merge_prs
+            if cur_state in (State.REVIEW_APPROVED, State.REVIEW_WAITING)
+        ]
+        if review_items:
+            _execute_auto_merges(
+                ctx, review_items, chat_id, provider,
+                target_state=State.QA_WAITING,
+                remove_modifiers=("flow:review-approved", "flow:reviewed"),
+                merge_reason="Reviewer aprovou sem comentários.",
+            )
+
+    elif stage == _STAGE_MERGE_QA:
+        # Merge final pós-QA: só processa issues em flow:qa-approved.
+        # Transição: flow:qa-approved → merge squash → flow:done.
+        qa_items = [
+            (repo, issue, sc)
+            for repo, issue, sc, cur_state in merge_prs
+            if cur_state is State.QA_APPROVED
+        ]
+        if qa_items:
+            _execute_auto_merges(
+                ctx, qa_items, chat_id, provider,
+                target_state=State.DONE,
+                remove_modifiers=("flow:qa-approved",),
+                merge_reason="QA aprovou.",
+            )
 
     elif stage == _STAGE_CONFLITO:
         # ── Despacha sessões de resolução de conflito de merge ───────────
@@ -3377,20 +3452,38 @@ def run_reviewer(ctx: object) -> None:
     _run_stage(ctx, _STAGE_REVIEWER)
 
 
-def run_merge(ctx: object) -> None:
-    """Entrypoint do cron de merge.
+def run_review_approved(ctx: object) -> None:
+    """Entrypoint do cron de merge pós-review.
 
-    Processa PRs aprovados (``flow:review-approved`` ou ``flow:qa-approved``) e
-    executa o merge squash automático. Intervalo curto recomendado: 120s.
+    Processa PRs em ``flow:review-approved`` e executa o merge squash
+    automático, movendo a issue para ``flow:qa-waiting``.
+    Intervalo curto recomendado: 120s.
 
-    Configure o modelo via ``stage_models.merge`` na deployment.config.yaml.
+    Configure o modelo via ``stage_models.merge-review`` na deployment.config.yaml.
 
     Registro (uma vez):
-        cron_add(name="flow-merge",
-                 script="~/.kiro/crew/crons/deployment.py:run_merge",
+        cron_add(name="flow-review-approved",
+                 script="~/.kiro/crew/crons/deployment.py:run_review_approved",
                  every=120)
     """
-    _run_stage(ctx, _STAGE_MERGE)
+    _run_stage(ctx, _STAGE_MERGE_REVIEW)
+
+
+def run_qa_approved(ctx: object) -> None:
+    """Entrypoint do cron de merge final pós-QA.
+
+    Processa PRs em ``flow:qa-approved`` e executa o merge squash final,
+    movendo a issue para ``flow:done``.
+    Intervalo curto recomendado: 120s.
+
+    Configure o modelo via ``stage_models.merge-qa`` na deployment.config.yaml.
+
+    Registro (uma vez):
+        cron_add(name="flow-qa-approved",
+                 script="~/.kiro/crew/crons/deployment.py:run_qa_approved",
+                 every=120)
+    """
+    _run_stage(ctx, _STAGE_MERGE_QA)
 
 
 def run_conflito(ctx: object) -> None:
@@ -3414,20 +3507,23 @@ def run_conflito(ctx: object) -> None:
 # ── Stub de compatibilidade — re-exporta entrypoints de deployment/flow/ ─────
 #
 # Os crons novos apontam para deployment/flow/<modulo>.py:run.
-# Os crons existentes (run_dev, run_reviewer, run_merge, run_conflito) continuam
-# funcionando via as funções definidas acima — não há quebra de compatibilidade.
+# Os crons existentes (run_dev, run_reviewer, run_review_approved,
+# run_qa_approved, run_conflito) continuam funcionando via as funções definidas
+# acima — não há quebra de compatibilidade.
 #
 # Importações dos módulos flow/ disponíveis para uso direto quando instalados:
 #
-#   from deployment.flow.dev      import run as run_dev_flow
-#   from deployment.flow.reviewer import run as run_reviewer_flow
-#   from deployment.flow.merge    import run as run_merge_flow
-#   from deployment.flow.conflict import run as run_conflict_flow
-#   from deployment.flow.rework   import run as run_rework_flow
+#   from deployment.flow.dev            import run as run_dev_flow
+#   from deployment.flow.reviewer       import run as run_reviewer_flow
+#   from deployment.flow.review_approved import run as run_review_approved_flow
+#   from deployment.flow.qa_approved    import run as run_qa_approved_flow
+#   from deployment.flow.conflict       import run as run_conflict_flow
+#   from deployment.flow.rework         import run as run_rework_flow
 #
 # Novos scripts de cron (após install-cron.sh):
 #   script="~/.kiro/crew/crons/deployment/flow/dev.py:run"
 #   script="~/.kiro/crew/crons/deployment/flow/reviewer.py:run"
-#   script="~/.kiro/crew/crons/deployment/flow/merge.py:run"
+#   script="~/.kiro/crew/crons/deployment/flow/review_approved.py:run"
+#   script="~/.kiro/crew/crons/deployment/flow/qa_approved.py:run"
 #   script="~/.kiro/crew/crons/deployment/flow/conflict.py:run"
 #   script="~/.kiro/crew/crons/deployment/flow/rework.py:run"

@@ -2464,13 +2464,22 @@ class TestStageActionsCobertura:
             "dispatch_rework deve estar em _STAGE_CONFLITO."
         )
 
+    # merge_pr é compartilhado intencionalmente pelos dois estágios de merge
+    # (_STAGE_MERGE_REVIEW e _STAGE_MERGE_QA): ambos os estados de origem
+    # (flow:review-approved e flow:qa-approved) emitem ActionKind.MERGE_PR, e a
+    # separação por estágio acontece filtrando pelo ScanResult.current_state no
+    # momento da execução, não pela ActionKind.
+    _SHARED_ACTIONS: frozenset[str] = frozenset({"merge_pr"})
+
     def test_estagios_sem_overlap(self) -> None:
-        """Uma mesma ActionKind não deve aparecer em dois estágios diferentes."""
+        """Uma mesma ActionKind não deve aparecer em dois estágios (exceto as compartilhadas)."""
         from deployment.deployment import _STAGE_ACTIONS
 
         seen: dict[str, str] = {}
         for stage, actions in _STAGE_ACTIONS.items():
             for action in actions:
+                if action in self._SHARED_ACTIONS:
+                    continue
                 assert action not in seen, (
                     f"ActionKind '{action}' aparece em dois estágios: "
                     f"'{seen[action]}' e '{stage}'. "
