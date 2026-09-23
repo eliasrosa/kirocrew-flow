@@ -873,7 +873,6 @@ def _post_agent_session(
         )
         return False
 
-    job = getattr(ctx, "job", None)
     req = _u.Request(
         f"http://localhost:{port}/api/chat",
         data=body,
