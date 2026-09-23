@@ -288,9 +288,11 @@ def _try_acquire_dispatch_lock(repo: str, issue_number: int) -> tuple[bool, str]
       fazer o unlink do arquivo que o outro acabou de criar.
     """
     short = repo.split("/")[-1]
-    lock_path = os.path.join(
-        _sessdir(), f"dashboard_esteira-{short}-{issue_number}.jsonl.lock"
-    )
+    # Lock criado em subdiretório separado (não em _sessdir()) para não
+    # interferir com os arquivos de sessão que o gateway cria.
+    backstop_dir = os.path.join(_sessdir(), "backstop")
+    os.makedirs(backstop_dir, exist_ok=True)
+    lock_path = os.path.join(backstop_dir, f"dispatch-{short}-{issue_number}.lock")
 
     def _try_open_excl() -> bool:
         """Tenta criar o lock com O_EXCL. Retorna True se adquiriu."""
@@ -891,8 +893,10 @@ def _post_agent_session(
         method="POST",
     )
     try:
-        from kiro_crew.loopback_http import loopback_urlopen  # type: ignore[import]
-        with loopback_urlopen(req, timeout=3) as resp:
+        # Usar urllib.request.urlopen padrão (equivalente ao que curl faz).
+        # loopback_urlopen usa ProxyHandler({}) + _NoRedirect que pode fechar
+        # a conexão de forma que o gateway interprete como cancelamento.
+        with _u.urlopen(req, timeout=10) as resp:
             resp.read(1)
     except Exception as exc:
         logger.error(
