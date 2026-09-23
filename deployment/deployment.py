@@ -770,7 +770,7 @@ def _post_agent_session(
     *,
     slot: str,
     cfg: dict,
-) -> None:
+) -> bool:
     """Despacha uma sessão de agente (fire-and-forget).
 
     Transporte preferido: POST ao webhook do dashboard (``KIROCREW_WEBHOOK_URL``)
@@ -786,6 +786,12 @@ def _post_agent_session(
 
     O corpo é idêntico nos dois transportes.  Exceções são engolidas/logadas,
     como no comportamento fire-and-forget original.
+
+    Retorna ``True`` quando o POST foi emitido com sucesso e ``False`` quando o
+    dispatch falhou ou foi abortado (POST com erro, ou ausência de
+    token/``_port``/``_secret``).  Chamadores que precisam distinguir sucesso de
+    falha para o operador (ex.: ``_dispatch_reviewer``) podem ramificar nesse
+    retorno; os demais tratam como fire-and-forget e ignoram o valor.
     """
     import urllib.request as _u
 
@@ -816,7 +822,8 @@ def _post_agent_session(
                 "deployment: falha ao despachar sessão via webhook (slot %s): %s",
                 slot, exc,
             )
-        return
+            return False
+        return True
 
     # ── Fallback: loopback interno (/api/chat) para ctx message-based ──────
     port = getattr(ctx, "_port", None)
@@ -827,7 +834,7 @@ def _post_agent_session(
             "e ctx sem _port/_secret (ScriptContext). Configure o secret do webhook.",
             slot,
         )
-        return
+        return False
 
     job = getattr(ctx, "job", None)
     job_id = getattr(job, "id", "") if job is not None else ""
@@ -850,6 +857,8 @@ def _post_agent_session(
             "deployment: falha ao despachar sessão via loopback (slot %s): %s",
             slot, exc,
         )
+        return False
+    return True
 
 
 def _dispatch_prompt(
@@ -2607,7 +2616,16 @@ def _dispatch_reviewer(
         )
 
     message = _reviewer_prompt(repo, pr_number, issue_number, head_sha=head_sha)
-    _post_agent_session(ctx, message, slot=slot, cfg=cfg)
+    if not _post_agent_session(ctx, message, slot=slot, cfg=cfg):
+        logger.error(
+            "deployment: falha ao despachar reviewer one-shot para %s PR #%s (issue #%s)",
+            repo, pr_number, issue_number,
+        )
+        ctx.notify(  # type: ignore[attr-defined]
+            f"KiroCrew Flow: falha ao despachar reviewer — "
+            f"{repo} PR #{pr_number} (issue #{issue_number}).{vm}"
+        )
+        return
     logger.info(
         "deployment: reviewer one-shot despachado para %s PR #%s (issue #%s)",
         repo, pr_number, issue_number,

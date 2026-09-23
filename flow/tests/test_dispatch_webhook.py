@@ -32,6 +32,7 @@ if _REPO_ROOT not in sys.path:
 import pytest  # noqa: E402
 
 from deployment.deployment import (  # noqa: E402
+    _dispatch_reviewer,
     _post_agent_session,
     _webhook_token,
     _webhook_url,
@@ -219,14 +220,29 @@ class TestPostAgentSessionWebhook:
     def test_webhook_swallows_exceptions(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Fire-and-forget: falha do POST ao webhook não propaga."""
+        """Fire-and-forget: falha do POST ao webhook não propaga, retorna False."""
         monkeypatch.setenv("KIROCREW_WEBHOOK_TOKEN", "tok-abc")
         ctx = _make_script_ctx()
         with mock.patch(
             "urllib.request.urlopen", side_effect=OSError("connection refused")
         ):
-            # Não deve levantar
-            _post_agent_session(ctx, "msg", slot="slot-1", cfg=_base_config())
+            # Não deve levantar; sinaliza falha
+            assert _post_agent_session(ctx, "msg", slot="slot-1", cfg=_base_config()) is False
+
+    def test_webhook_returns_true_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POST bem-sucedido ao webhook retorna True."""
+        monkeypatch.setenv("KIROCREW_WEBHOOK_TOKEN", "tok-abc")
+        ctx = _make_script_ctx()
+
+        def _fake_urlopen(req: object, timeout: float = 0):  # type: ignore[no-untyped-def]
+            return mock.MagicMock(
+                __enter__=lambda s: s, __exit__=lambda *a: False, read=lambda n=-1: b""
+            )
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            assert _post_agent_session(ctx, "msg", slot="slot-1", cfg=_base_config()) is True
 
 
 # ---------------------------------------------------------------------------
@@ -274,13 +290,13 @@ class TestPostAgentSessionLoopbackFallback:
     def test_no_token_script_ctx_no_attribute_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Sem token e ctx sem _port/_secret: sem AttributeError, sem POST."""
+        """Sem token e ctx sem _port/_secret: sem AttributeError, sem POST, retorna False."""
         monkeypatch.delenv("KIROCREW_WEBHOOK_TOKEN", raising=False)
 
         ctx = _make_script_ctx()  # sem _port/_secret
         with mock.patch("urllib.request.urlopen") as mock_webhook:
-            # Não deve levantar AttributeError
-            _post_agent_session(ctx, "msg", slot="slot-1", cfg=_base_config())
+            # Não deve levantar AttributeError; sinaliza abort/falha
+            assert _post_agent_session(ctx, "msg", slot="slot-1", cfg=_base_config()) is False
 
         mock_webhook.assert_not_called()
 
@@ -336,3 +352,69 @@ class TestZeroTokenScan:
             run_dev(ctx)
 
         mock_dispatch.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Reviewer — sinalização de sucesso/falha do dispatch (issues #2/#3 do review)
+# ---------------------------------------------------------------------------
+
+class TestReviewerDispatchSignalling:
+    """O reviewer é o único dispatcher que reporta falha ao operador via notify.
+
+    Garante que a notify de sucesso só dispara quando o POST teve sucesso e que
+    a notify de falha ('falha ao despachar reviewer') volta a disparar quando
+    ``_post_agent_session`` sinaliza falha (regressão do review v1).
+    """
+
+    def _patches(self, pr_found: bool = True):  # type: ignore[no-untyped-def]
+        pr_json = json.dumps([{"number": 7}]) if pr_found else "[]"
+        gh_result = mock.MagicMock(returncode=0, stdout=pr_json)
+        sha_result = mock.MagicMock(returncode=0, stdout="abc123")
+        return mock.patch(
+            "deployment.deployment.subprocess.run",
+            side_effect=[gh_result, sha_result],
+        )
+
+    def test_reviewer_notifies_success_when_post_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ctx = _make_script_ctx()
+        issue = {"number": 42, "title": "Test"}
+        with (
+            mock.patch("deployment.deployment._is_issue_closed", return_value=False),
+            self._patches(pr_found=True),
+            mock.patch(
+                "deployment.deployment._reviewer_prompt", return_value="review this"
+            ),
+            mock.patch(
+                "deployment.deployment._post_agent_session", return_value=True
+            ) as mock_post,
+        ):
+            _dispatch_reviewer(ctx, "owner/repo", issue, _base_config())
+
+        mock_post.assert_called_once()
+        notify_msgs = [c.args[0] for c in ctx.notify.call_args_list]
+        assert any("sessão one-shot do reviewer despachada" in m for m in notify_msgs)
+        assert not any("falha ao despachar reviewer" in m for m in notify_msgs)
+
+    def test_reviewer_notifies_failure_when_post_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ctx = _make_script_ctx()
+        issue = {"number": 42, "title": "Test"}
+        with (
+            mock.patch("deployment.deployment._is_issue_closed", return_value=False),
+            self._patches(pr_found=True),
+            mock.patch(
+                "deployment.deployment._reviewer_prompt", return_value="review this"
+            ),
+            mock.patch(
+                "deployment.deployment._post_agent_session", return_value=False
+            ) as mock_post,
+        ):
+            _dispatch_reviewer(ctx, "owner/repo", issue, _base_config())
+
+        mock_post.assert_called_once()
+        notify_msgs = [c.args[0] for c in ctx.notify.call_args_list]
+        assert any("falha ao despachar reviewer" in m for m in notify_msgs)
+        assert not any("sessão one-shot do reviewer despachada" in m for m in notify_msgs)
