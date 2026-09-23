@@ -604,7 +604,10 @@ class TestTryAcquireDispatchLock:
         """Lock recente já existente: adquisição falha (outro ciclo ganhou a corrida)."""
         from deployment.deployment import _try_acquire_dispatch_lock
 
-        lock = tmp_path / "dashboard_esteira-myrepo-42.jsonl.lock"
+        # O backstop lock agora fica em backstop/ (não direto no sessdir)
+        backstop_dir = tmp_path / "backstop"
+        backstop_dir.mkdir()
+        lock = backstop_dir / "dispatch-myrepo-42.lock"
         lock.touch()
         monkeypatch.setattr("deployment.deployment._sessdir", lambda: str(tmp_path))
 
@@ -764,31 +767,21 @@ class TestDispatchAcquiresLockBeforePost:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """O backstop lock deve existir quando o POST /api/chat é chamado."""
-        import sys
-        import types
-
         from deployment.deployment import _dispatch
 
         monkeypatch.setattr("deployment.deployment._sessdir", lambda: str(tmp_path))
 
         lock_existed_at_post_time: list[bool] = []
 
-        # Cria um módulo fake para kiro_crew.loopback_http
-        def fake_loopback_urlopen(req, timeout=3):  # type: ignore[no-untyped-def]
-            lock = tmp_path / "dashboard_esteira-myrepo-42.jsonl.lock"
+        def fake_urlopen(req, timeout=10):  # type: ignore[no-untyped-def]
+            # O backstop lock agora fica em backstop/ (não direto no sessdir)
+            lock = tmp_path / "backstop" / "dispatch-myrepo-42.lock"
             lock_existed_at_post_time.append(lock.exists())
             resp = mock.MagicMock()
             resp.__enter__ = mock.MagicMock(return_value=resp)
             resp.__exit__ = mock.MagicMock(return_value=False)
             resp.read = mock.MagicMock(return_value=b"")
             return resp
-
-        fake_loopback_mod = types.ModuleType("kiro_crew.loopback_http")
-        fake_loopback_mod.loopback_urlopen = fake_loopback_urlopen  # type: ignore[attr-defined]
-        fake_kiro_crew = types.ModuleType("kiro_crew")
-
-        monkeypatch.setitem(sys.modules, "kiro_crew", fake_kiro_crew)
-        monkeypatch.setitem(sys.modules, "kiro_crew.loopback_http", fake_loopback_mod)
 
         cfg = {
             "dev_root": str(tmp_path),
@@ -798,11 +791,14 @@ class TestDispatchAcquiresLockBeforePost:
         }
         issue = {"number": 42, "title": "Test issue", "url": "https://github.com/owner/myrepo/issues/42"}
 
-        with mock.patch("deployment.deployment._dispatch_prompt", return_value="msg"):
+        with (
+            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            mock.patch("deployment.deployment._dispatch_prompt", return_value="msg"),
+        ):
             _dispatch(self._make_ctx(), "owner/myrepo", issue, cfg)
 
         # O lock deve ter existido quando o POST foi feito
-        assert lock_existed_at_post_time, "loopback_urlopen nunca foi chamado"
+        assert lock_existed_at_post_time, "urlopen nunca foi chamado"
         assert lock_existed_at_post_time[0] is True, (
             "O lock NÃO existia quando o POST foi feito — race condition!"
         )
