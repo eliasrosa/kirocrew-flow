@@ -874,7 +874,6 @@ def _post_agent_session(
         return False
 
     job = getattr(ctx, "job", None)
-    job_id = getattr(job, "id", "") if job is not None else ""
     req = _u.Request(
         f"http://localhost:{port}/api/chat",
         data=body,
