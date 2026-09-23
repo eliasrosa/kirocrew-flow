@@ -794,6 +794,7 @@ class TestDispatchAcquiresLockBeforePost:
         with (
             mock.patch("subprocess.run", side_effect=fake_run),
             mock.patch("deployment.deployment._dispatch_prompt", return_value="msg"),
+            mock.patch("deployment.deployment._is_issue_closed", return_value=False),
         ):
             _dispatch(self._make_ctx(), "owner/myrepo", issue, cfg)
 
