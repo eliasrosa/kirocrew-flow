@@ -3516,7 +3516,7 @@ class TestEditIssueLabelsTransport:
 
     def test_transport_monta_comando_correto(self) -> None:
         """edit_issue_labels monta: gh issue edit N --repo R --add-label A --remove-label B.
-        
+
         Usa _run_raw (não _run) porque gh issue edit retorna URL (texto), não JSON.
         """
         from flow.adapters import github_transport as t
