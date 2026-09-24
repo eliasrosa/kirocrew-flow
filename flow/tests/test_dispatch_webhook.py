@@ -107,7 +107,7 @@ def _make_scan_result(state_label: str) -> object:
 class TestPostAgentSessionLoopback:
     def _fake_urlopen(self, calls: list) -> object:
         class _FakeResp:
-            def __enter__(self) -> "_FakeResp":
+            def __enter__(self) -> _FakeResp:
                 return self
             def __exit__(self, *a: object) -> bool:
                 return False
@@ -147,7 +147,7 @@ class TestPostAgentSessionLoopback:
         captured: dict = {}
 
         class _FakeResp:
-            def __enter__(self) -> "_FakeResp": return self
+            def __enter__(self) -> _FakeResp: return self
             def __exit__(self, *a: object) -> bool: return False
             def read(self, _n: int = -1) -> bytes: return b""
 
@@ -180,7 +180,7 @@ class TestPostAgentSessionLoopback:
         ctx = _make_script_ctx()
 
         class _FakeResp:
-            def __enter__(self) -> "_FakeResp": return self
+            def __enter__(self) -> _FakeResp: return self
             def __exit__(self, *a: object) -> bool: return False
             def read(self, _n: int = -1) -> bytes: return b""
 
@@ -202,7 +202,7 @@ class TestPostAgentSessionLoopback:
         ctx = _make_script_ctx()
 
         class _FakeResp:
-            def __enter__(self) -> "_FakeResp": return self
+            def __enter__(self) -> _FakeResp: return self
             def __exit__(self, *a: object) -> bool: return False
             def read(self, _n: int = -1) -> bytes: return b""
 
@@ -236,7 +236,7 @@ class TestPostAgentSessionLoopback:
         captured: dict = {}
 
         class _FakeResp:
-            def __enter__(self) -> "_FakeResp": return self
+            def __enter__(self) -> _FakeResp: return self
             def __exit__(self, *a: object) -> bool: return False
             def read(self, _n: int = -1) -> bytes: return b""
 
