@@ -19,7 +19,6 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Literal
 from unittest import mock
 
 _REPO_ROOT = str(Path(__file__).parent.parent.parent)
