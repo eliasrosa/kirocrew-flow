@@ -108,8 +108,8 @@ class TestPostAgentSessionLoopback:
         class _FakeResp:
             def __enter__(self) -> _FakeResp:
                 return self
-            def __exit__(self, *a: object) -> bool:
-                return False
+            def __exit__(self, *a: object) -> None:
+                return None
             def read(self, _n: int = -1) -> bytes:
                 return b""
 
@@ -147,7 +147,7 @@ class TestPostAgentSessionLoopback:
 
         class _FakeResp:
             def __enter__(self) -> _FakeResp: return self
-            def __exit__(self, *a: object) -> bool: return False
+            def __exit__(self, *a: object) -> None: return None
             def read(self, _n: int = -1) -> bytes: return b""
 
         call_count = 0
@@ -180,7 +180,7 @@ class TestPostAgentSessionLoopback:
 
         class _FakeResp:
             def __enter__(self) -> _FakeResp: return self
-            def __exit__(self, *a: object) -> bool: return False
+            def __exit__(self, *a: object) -> None: return None
             def read(self, _n: int = -1) -> bytes: return b""
 
         def fake(req: object, timeout: float = 0) -> _FakeResp:  # type: ignore[no-untyped-def]
@@ -202,7 +202,7 @@ class TestPostAgentSessionLoopback:
 
         class _FakeResp:
             def __enter__(self) -> _FakeResp: return self
-            def __exit__(self, *a: object) -> bool: return False
+            def __exit__(self, *a: object) -> None: return None
             def read(self, _n: int = -1) -> bytes: return b""
 
         def fake(req: object, timeout: float = 0) -> _FakeResp:  # type: ignore[no-untyped-def]
@@ -236,7 +236,7 @@ class TestPostAgentSessionLoopback:
 
         class _FakeResp:
             def __enter__(self) -> _FakeResp: return self
-            def __exit__(self, *a: object) -> bool: return False
+            def __exit__(self, *a: object) -> None: return None
             def read(self, _n: int = -1) -> bytes: return b""
 
         def fake(req: object, timeout: float = 0) -> _FakeResp:  # type: ignore[no-untyped-def]

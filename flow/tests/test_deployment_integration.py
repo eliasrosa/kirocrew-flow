@@ -776,8 +776,8 @@ class TestDispatchAcquiresLockBeforePost:
         class _FakeResp:
             def __enter__(self) -> _FakeResp:
                 return self
-            def __exit__(self, *a: object) -> bool:
-                return False
+            def __exit__(self, *a: object) -> None:
+                return None
             def read(self, _n: int = -1) -> bytes:
                 return b""
 
