@@ -31,6 +31,8 @@ LABELS=(
 
   # ── ESTADOS DO AGENTE — code review ──────────────────────────────────
   "flow:review-waiting|7C3AED|PR aberta, aguardando reviewer automatizado"
+  # Lock interno anti-loop: reviewer marca antes de despachar a sessao one-shot
+  "flow:reviewed|7C3AED|Lock interno: reviewer em andamento ou resultado pendente"
   "flow:review-approved|6D28D9|Reviewer aprovou, pronto para QA"
   # Estado de espera HUMANA: TL/dev avalia o motivo e move manualmente
   "flow:review-refused|9333EA|Reviewer reprovou - aguarda TL/dev avaliar e mover label"
